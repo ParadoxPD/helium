@@ -119,10 +119,10 @@ impl fmt::Display for Expr {
             Expr::Literal(v) => write!(f, "{v}"),
             Expr::Null => write!(f, "NULL"),
             Expr::Unary { op, expr } => {
-                write!(f, "({:?} {})", op, expr)
+                write!(f, "{:?} {}", op, expr)
             }
             Expr::Binary { left, op, right } => {
-                write!(f, "({} {:?} {})", left, op, right)
+                write!(f, "{} {:?} {}", left, op, right)
             }
         }
     }

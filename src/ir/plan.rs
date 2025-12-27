@@ -32,6 +32,15 @@ pub struct Limit {
     pub count: usize,
 }
 
+impl Limit {
+    pub fn clone_with_input(&self, input: LogicalPlan) -> Self {
+        Self {
+            count: self.count,
+            input: Box::new(input),
+        }
+    }
+}
+
 impl LogicalPlan {
     pub fn scan(table: impl Into<String>) -> Self {
         LogicalPlan::Scan(Scan {

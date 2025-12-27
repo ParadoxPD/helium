@@ -46,8 +46,7 @@ fn node_label(plan: &LogicalPlan) -> String {
             format!("Scan {table}")
         }
         LogicalPlan::Filter(Filter { predicate, .. }) => {
-            // predicate already formats nicely
-            format!("Filter {predicate}")
+            format!("Filter ({predicate})")
         }
         LogicalPlan::Project(Project { exprs, .. }) => {
             let fields = exprs

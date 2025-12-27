@@ -21,6 +21,13 @@ fn collect_required_columns(plan: &LogicalPlan, required: &mut HashSet<String>) 
             collect_columns(&filter.predicate, required);
             collect_required_columns(&filter.input, required);
         }
+        LogicalPlan::Sort(sort) => {
+            for (expr, _) in &sort.keys {
+                collect_columns(expr, required);
+            }
+            collect_required_columns(&sort.input, required);
+        }
+
         LogicalPlan::Limit(limit) => {
             collect_required_columns(&limit.input, required);
         }
@@ -85,6 +92,11 @@ fn rewrite(plan: &LogicalPlan, required: &mut HashSet<String>) -> LogicalPlan {
             scan.columns = required.iter().cloned().collect();
             LogicalPlan::Scan(scan)
         }
+
+        LogicalPlan::Sort(sort) => LogicalPlan::Sort(crate::ir::plan::Sort {
+            input: Box::new(rewrite(&sort.input, required)),
+            keys: sort.keys.clone(),
+        }),
     }
 }
 

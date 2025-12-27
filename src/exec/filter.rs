@@ -1,4 +1,5 @@
 use crate::common::value::Value;
+use crate::exec::expr_eval::eval_predicate;
 use crate::exec::operator::{Operator, Row};
 use crate::ir::expr::{BinaryOp, Expr};
 
@@ -37,27 +38,6 @@ fn eval_value(expr: &Expr, row: &Row) -> Value {
         Expr::Column(c) => row.get(&c.name).cloned().unwrap_or(Value::Null),
         Expr::Literal(v) => v.clone(),
         _ => Value::Null,
-    }
-}
-
-fn eval_predicate(expr: &Expr, row: &Row) -> bool {
-    match expr {
-        Expr::Binary { left, op, right } => match op {
-            BinaryOp::And => eval_predicate(left, row) && eval_predicate(right, row),
-            BinaryOp::Or => eval_predicate(left, row) || eval_predicate(right, row),
-            BinaryOp::Eq => eval_value(left, row) == eval_value(right, row),
-            BinaryOp::Gt => match (eval_value(left, row), eval_value(right, row)) {
-                (Value::Int64(a), Value::Int64(b)) => a > b,
-                _ => false,
-            },
-            BinaryOp::Lt => match (eval_value(left, row), eval_value(right, row)) {
-                (Value::Int64(a), Value::Int64(b)) => a < b,
-                _ => false,
-            },
-            _ => false,
-        },
-        Expr::Literal(Value::Bool(b)) => *b,
-        _ => false,
     }
 }
 

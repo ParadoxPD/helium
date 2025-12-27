@@ -34,6 +34,9 @@ fn fmt_plan(plan: &LogicalPlan, prefix: &str, is_last: bool, is_root: bool, out:
         LogicalPlan::Project(Project { input, .. }) => {
             fmt_plan(input, &child_prefix, true, false, out);
         }
+        LogicalPlan::Sort(sort) => {
+            fmt_plan(&sort.input, &child_prefix, true, false, out);
+        }
         LogicalPlan::Limit(Limit { input, .. }) => {
             fmt_plan(input, &child_prefix, true, false, out);
         }
@@ -56,6 +59,22 @@ fn node_label(plan: &LogicalPlan) -> String {
                 .join(", ");
 
             format!("Project [{fields}]")
+        }
+        LogicalPlan::Sort(sort) => {
+            let keys = sort
+                .keys
+                .iter()
+                .map(|(e, asc)| {
+                    if *asc {
+                        format!("{e} ASC")
+                    } else {
+                        format!("{e} DESC")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            format!("Sort [{keys}]")
         }
         LogicalPlan::Limit(Limit { count, .. }) => {
             format!("Limit {count}")

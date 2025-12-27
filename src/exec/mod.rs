@@ -1,8 +1,10 @@
+pub mod expr_eval;
 pub mod filter;
 pub mod limit;
 pub mod operator;
 pub mod project;
 pub mod scan;
+pub mod sort;
 
 use std::collections::HashMap;
 
@@ -12,6 +14,7 @@ use crate::exec::limit::LimitExec;
 use crate::exec::operator::{Operator, Row};
 use crate::exec::project::ProjectExec;
 use crate::exec::scan::ScanExec;
+use crate::exec::sort::SortExec;
 use crate::ir::plan::LogicalPlan;
 
 pub type Catalog = HashMap<String, Vec<Row>>;
@@ -31,6 +34,11 @@ pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
         LogicalPlan::Project(project) => {
             let input = lower(&project.input, catalog);
             Box::new(ProjectExec::new(input, project.exprs.clone()))
+        }
+
+        LogicalPlan::Sort(sort) => {
+            let input = lower(&sort.input, catalog);
+            Box::new(SortExec::new(input, sort.keys.clone()))
         }
 
         LogicalPlan::Limit(limit) => {

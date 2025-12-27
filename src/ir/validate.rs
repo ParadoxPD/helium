@@ -1,5 +1,5 @@
 use crate::ir::expr::Expr;
-use crate::ir::plan::{Filter, Limit, LogicalPlan, Project, Scan};
+use crate::ir::plan::{Filter, Limit, LogicalPlan, Project, Scan, Sort};
 
 #[derive(Debug, PartialEq)]
 pub enum ValidationError {
@@ -7,6 +7,7 @@ pub enum ValidationError {
     ZeroLimit,
     NullPredicate,
     InvalidStructure(&'static str),
+    EmptySortKeys,
 }
 
 pub type ValidationResult = Result<(), ValidationError>;
@@ -18,6 +19,7 @@ pub fn validate(plan: &LogicalPlan) -> ValidationResult {
 fn validate_node(plan: &LogicalPlan) -> ValidationResult {
     match plan {
         LogicalPlan::Scan(scan) => validate_scan(scan),
+        LogicalPlan::Sort(sort) => validate_sort(sort),
         LogicalPlan::Filter(filter) => validate_filter(filter),
         LogicalPlan::Project(project) => validate_project(project),
         LogicalPlan::Limit(limit) => validate_limit(limit),
@@ -26,6 +28,13 @@ fn validate_node(plan: &LogicalPlan) -> ValidationResult {
 
 fn validate_scan(_scan: &Scan) -> ValidationResult {
     Ok(())
+}
+
+fn validate_sort(sort: &Sort) -> ValidationResult {
+    if sort.keys.is_empty() {
+        return Err(ValidationError::EmptySortKeys);
+    }
+    validate_node(&sort.input)
 }
 
 fn validate_filter(filter: &Filter) -> ValidationResult {

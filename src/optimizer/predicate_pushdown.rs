@@ -7,6 +7,11 @@ pub fn predicate_pushdown(plan: &LogicalPlan) -> LogicalPlan {
             input: Box::new(predicate_pushdown(&project.input)),
             exprs: project.exprs.clone(),
         }),
+        LogicalPlan::Sort(sort) => LogicalPlan::Sort(crate::ir::plan::Sort {
+            input: Box::new(predicate_pushdown(&sort.input)),
+            keys: sort.keys.clone(),
+        }),
+
         LogicalPlan::Limit(limit) => LogicalPlan::Limit(limit.clone()),
         LogicalPlan::Scan(_) => plan.clone(),
     }

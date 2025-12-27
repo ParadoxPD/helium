@@ -3,11 +3,18 @@ use std::collections::HashMap;
 use crate::common::value::Value;
 use crate::exec::operator::Row;
 use crate::exec::{Catalog, lower};
+use crate::frontend::sql::lower::Lowered;
 use crate::frontend::sql::{lower as sql_lower, parser};
+use crate::ir::pretty::pretty;
 use crate::optimizer::optimize;
 
 pub struct Database {
     catalog: Catalog,
+}
+
+pub enum QueryResult {
+    Rows(Vec<Row>),
+    Explain(String),
 }
 
 impl Database {
@@ -21,20 +28,48 @@ impl Database {
         self.catalog.insert(name.to_string(), rows);
     }
 
-    pub fn query(&self, sql: &str) -> Vec<Row> {
-        let ast = parser::parse(sql);
-        let plan = sql_lower::lower(ast);
-        let plan = optimize(&plan);
+    pub fn query(&self, sql: &str) -> QueryResult {
+        let stmt = parser::parse(sql);
+        let lowered = sql_lower::lower_stmt(stmt);
 
-        let mut exec = lower(&plan, &self.catalog);
-        exec.open();
+        match lowered {
+            Lowered::Plan(plan) => {
+                let plan = optimize(&plan);
+                let mut exec = lower(&plan, &self.catalog);
+                exec.open();
 
-        let mut results = Vec::new();
-        while let Some(row) = exec.next() {
-            results.push(row);
+                let mut rows = Vec::new();
+                while let Some(row) = exec.next() {
+                    rows.push(row);
+                }
+                QueryResult::Rows(rows)
+            }
+
+            Lowered::Explain { analyze, plan } => {
+                let plan = optimize(&plan);
+
+                if !analyze {
+                    QueryResult::Explain(pretty(&plan));
+                }
+
+                let start = std::time::Instant::now();
+                let mut exec = lower(&plan, &self.catalog);
+                exec.open();
+
+                let mut rows = 0;
+                while exec.next().is_some() {
+                    rows += 1;
+                }
+
+                let elapsed = start.elapsed().as_micros();
+                QueryResult::Explain(format!(
+                    "{}\n\nrows={} time={}µs",
+                    pretty(&plan),
+                    rows,
+                    elapsed
+                ))
+            }
         }
-
-        results
     }
 }
 
@@ -75,9 +110,38 @@ mod tests {
             ],
         );
 
-        let results = db.query("SELECT name FROM users WHERE age > 18 AND score > 50 LIMIT 1;");
+        match db.query("SELECT name FROM users WHERE age > 18 AND score > 50 LIMIT 1;") {
+            QueryResult::Rows(results) => {
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].get("name"), Some(&Value::String("Alice".into())));
+            }
+            _ => panic!("expected rows"),
+        }
+    }
 
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].get("name"), Some(&Value::String("Alice".into())));
+    #[test]
+    fn sql_order_by_works() {
+        let mut db = Database::new();
+
+        db.insert_table(
+            "users",
+            vec![
+                row(&[
+                    ("name", Value::String("Bob".into())),
+                    ("age", Value::Int64(30)),
+                ]),
+                row(&[
+                    ("name", Value::String("Alice".into())),
+                    ("age", Value::Int64(20)),
+                ]),
+            ],
+        );
+
+        match db.query("SELECT name FROM users ORDER BY age ASC;") {
+            QueryResult::Rows(rows) => {
+                assert_eq!(rows[0].get("name"), Some(&Value::String("Alice".into())));
+            }
+            _ => panic!("expected rows"),
+        }
     }
 }

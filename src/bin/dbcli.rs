@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use helium::api::db::Database;
+use helium::api::db::{Database, QueryResult};
 use helium::common::value::Value;
 use helium::exec::operator::Row;
 
@@ -45,10 +45,15 @@ fn main() {
             continue;
         }
 
-        let rows = db.query(input);
+        let result = db.query(input);
 
-        for row in rows {
-            println!("{row:?}");
+        match result {
+            QueryResult::Explain(_) => {}
+            QueryResult::Rows(rows) => {
+                for row in rows {
+                    println!("{row:?}");
+                }
+            }
         }
     }
 }

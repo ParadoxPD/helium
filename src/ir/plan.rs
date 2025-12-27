@@ -5,6 +5,7 @@ pub enum LogicalPlan {
     Scan(Scan),
     Filter(Filter),
     Project(Project),
+    Sort(Sort),
     Limit(Limit),
 }
 
@@ -30,6 +31,12 @@ pub struct Project {
 pub struct Limit {
     pub input: Box<LogicalPlan>,
     pub count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sort {
+    pub input: Box<LogicalPlan>,
+    pub keys: Vec<(Expr, bool)>, // (expr, asc)
 }
 
 impl Limit {
@@ -63,6 +70,13 @@ impl LogicalPlan {
         })
     }
 
+    pub fn sort(self, keys: Vec<(Expr, bool)>) -> Self {
+        LogicalPlan::Sort(Sort {
+            input: Box::new(self),
+            keys,
+        })
+    }
+
     pub fn limit(self, count: usize) -> Self {
         LogicalPlan::Limit(Limit {
             input: Box::new(self),
@@ -75,6 +89,7 @@ impl LogicalPlan {
             LogicalPlan::Scan(_) => 0,
             LogicalPlan::Filter(_) => 1,
             LogicalPlan::Project(_) => 1,
+            LogicalPlan::Sort(_) => 1,
             LogicalPlan::Limit(_) => 1,
         }
     }
@@ -84,6 +99,7 @@ impl LogicalPlan {
             LogicalPlan::Filter(f) => Some(&f.input),
             LogicalPlan::Project(p) => Some(&p.input),
             LogicalPlan::Limit(l) => Some(&l.input),
+            LogicalPlan::Sort(s) => Some(&s.input),
             LogicalPlan::Scan(_) => None,
         }
     }

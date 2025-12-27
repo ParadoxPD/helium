@@ -17,6 +17,14 @@ pub fn constant_fold(plan: &LogicalPlan) -> LogicalPlan {
                 .map(|(e, a)| (fold_expr(e), a.clone()))
                 .collect(),
         }),
+        LogicalPlan::Sort(sort) => LogicalPlan::Sort(crate::ir::plan::Sort {
+            input: Box::new(constant_fold(&sort.input)),
+            keys: sort
+                .keys
+                .iter()
+                .map(|(e, asc)| (fold_expr(e), *asc))
+                .collect(),
+        }),
         LogicalPlan::Limit(limit) => LogicalPlan::Limit(limit.clone()),
     }
 }

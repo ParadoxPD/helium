@@ -40,6 +40,10 @@ fn fmt_plan(plan: &LogicalPlan, prefix: &str, is_last: bool, is_root: bool, out:
         LogicalPlan::Limit(Limit { input, .. }) => {
             fmt_plan(input, &child_prefix, true, false, out);
         }
+        LogicalPlan::Join(join) => {
+            fmt_plan(&join.left, &child_prefix, false, false, out);
+            fmt_plan(&join.right, &child_prefix, true, false, out);
+        }
     }
 }
 
@@ -79,6 +83,9 @@ fn node_label(plan: &LogicalPlan) -> String {
         LogicalPlan::Limit(Limit { count, .. }) => {
             format!("Limit {count}")
         }
+        LogicalPlan::Join(join) => {
+            format!("Join ({})", join.on)
+        }
     }
 }
 
@@ -91,7 +98,7 @@ mod tests {
 
     #[test]
     fn pretty_print_scan() {
-        let plan = LogicalPlan::scan("users");
+        let plan = LogicalPlan::scan("users", "u");
 
         let output = pretty(&plan);
 
@@ -100,8 +107,8 @@ mod tests {
 
     #[test]
     fn pretty_print_filter() {
-        let plan = LogicalPlan::scan("users").filter(Expr::bin(
-            Expr::col("age"),
+        let plan = LogicalPlan::scan("users", "u").filter(Expr::bin(
+            Expr::bound_col("t", "age"),
             BinaryOp::Gt,
             Expr::lit(Value::Int64(18)),
         ));
@@ -114,15 +121,15 @@ mod tests {
 
     #[test]
     fn pretty_print_project_chain() {
-        let plan = LogicalPlan::scan("users")
+        let plan = LogicalPlan::scan("users", "u")
             .filter(Expr::bin(
-                Expr::col("active"),
+                Expr::bound_col("t", "active"),
                 BinaryOp::Eq,
                 Expr::lit(Value::Bool(true)),
             ))
             .project(vec![
-                (Expr::col("email"), "email"),
-                (Expr::col("name"), "name"),
+                (Expr::bound_col("t", "email"), "email"),
+                (Expr::bound_col("t", "name"), "name"),
             ])
             .limit(5);
 
@@ -140,7 +147,7 @@ Limit 5
 
     #[test]
     fn pretty_output_is_stable() {
-        let plan = LogicalPlan::scan("users").limit(1);
+        let plan = LogicalPlan::scan("users", "u").limit(1);
 
         let a = pretty(&plan);
         let b = pretty(&plan);

@@ -33,43 +33,34 @@ impl Operator for FilterExec {
     }
 }
 
-fn eval_value(expr: &Expr, row: &Row) -> Value {
-    match expr {
-        Expr::Column(c) => row.get(&c.name).cloned().unwrap_or(Value::Null),
-        Expr::Literal(v) => v.clone(),
-        _ => Value::Null,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::value::Value;
     use crate::exec::operator::Operator;
     use crate::exec::scan::ScanExec;
+    use crate::exec::test_util::qrow;
     use crate::ir::expr::{BinaryOp, Expr};
 
     #[test]
     fn filter_removes_rows() {
         let data = vec![
-            [("age", Value::Int64(10))]
-                .into_iter()
-                .map(|(k, v)| (k.into(), v))
-                .collect(),
-            [("age", Value::Int64(30))]
-                .into_iter()
-                .map(|(k, v)| (k.into(), v))
-                .collect(),
+            qrow("t", &[("age", Value::Int64(10))]),
+            qrow("t", &[("age", Value::Int64(30))]),
         ];
 
         let scan = ScanExec::new(data);
-        let predicate = Expr::bin(Expr::col("age"), BinaryOp::Gt, Expr::lit(Value::Int64(18)));
+        let predicate = Expr::bin(
+            Expr::bound_col("t", "age"),
+            BinaryOp::Gt,
+            Expr::lit(Value::Int64(18)),
+        );
 
         let mut filter = FilterExec::new(Box::new(scan), predicate);
         filter.open();
 
         let row = filter.next().unwrap();
-        assert_eq!(row.get("age"), Some(&Value::Int64(30)));
+        assert_eq!(row.get("t.age"), Some(&Value::Int64(30)));
         assert!(filter.next().is_none());
     }
 }

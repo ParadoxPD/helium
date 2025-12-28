@@ -4,7 +4,9 @@ use crate::ir::expr::{BinaryOp, Expr, UnaryOp};
 
 pub fn eval_value(expr: &Expr, row: &Row) -> Value {
     match expr {
-        Expr::Column(c) => row.get(&c.name).cloned().unwrap_or(Value::Null),
+        Expr::Column(_) => {
+            panic!("BUG: Expr::Column reached execution — must be BoundColumn");
+        }
         Expr::Literal(v) => v.clone(),
 
         Expr::Unary { op, expr } => {
@@ -27,6 +29,11 @@ pub fn eval_value(expr: &Expr, row: &Row) -> Value {
                 _ => Value::Null,
             }
         }
+
+        Expr::BoundColumn { table, name } => row
+            .get(&format!("{table}.{name}"))
+            .cloned()
+            .unwrap_or(Value::Null),
 
         Expr::Null => Value::Null,
     }

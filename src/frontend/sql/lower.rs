@@ -1,6 +1,8 @@
 use crate::common::value::Value;
+use crate::frontend::sql::ast::FromItem;
+use crate::frontend::sql::binder::{Binder, BoundFromItem, BoundSelect};
 use crate::ir::expr::{BinaryOp as IRBinOp, Expr as IRExpr};
-use crate::ir::plan::{LogicalPlan, Sort};
+use crate::ir::plan::{Join, LogicalPlan, Sort};
 
 use super::ast::*;
 
@@ -11,7 +13,10 @@ pub enum Lowered {
 
 pub fn lower_stmt(stmt: Statement) -> Lowered {
     match stmt {
-        Statement::Select(s) => Lowered::Plan(lower_select(s)),
+        Statement::Select(s) => {
+            let bound = Binder::bind(s).expect("bind error");
+            Lowered::Plan(lower_select(bound))
+        }
         Statement::Explain { analyze, stmt } => {
             let inner = lower_stmt(*stmt);
             match inner {
@@ -22,33 +27,32 @@ pub fn lower_stmt(stmt: Statement) -> Lowered {
     }
 }
 
-pub fn lower_select(stmt: SelectStmt) -> LogicalPlan {
-    let mut plan = LogicalPlan::scan(&stmt.table);
+pub fn lower_select(stmt: BoundSelect) -> LogicalPlan {
+    let mut plan = lower_from(stmt.from);
 
     if let Some(expr) = stmt.where_clause {
-        plan = plan.filter(lower_expr(expr));
+        plan = plan.filter(expr);
     }
 
-    let projections = stmt
-        .columns
-        .into_iter()
-        .map(|c| (IRExpr::col(&c), c))
-        .collect();
-
-    plan = plan.project(projections);
-
     if !stmt.order_by.is_empty() {
-        let keys = stmt
-            .order_by
-            .into_iter()
-            .map(|o| (IRExpr::col(o.column), o.asc))
-            .collect();
+        let keys = stmt.order_by;
 
         plan = LogicalPlan::Sort(Sort {
             input: Box::new(plan),
             keys,
         });
     }
+
+    let projections: Vec<(IRExpr, String)> = stmt
+        .columns
+        .into_iter()
+        .map(|expr| {
+            let name = output_name(&expr);
+            (expr, name)
+        })
+        .collect();
+
+    plan = plan.project(projections);
 
     if let Some(limit) = stmt.limit {
         plan = plan.limit(limit);
@@ -57,22 +61,22 @@ pub fn lower_select(stmt: SelectStmt) -> LogicalPlan {
     plan
 }
 
-fn lower_expr(expr: Expr) -> IRExpr {
+fn lower_from(from: BoundFromItem) -> LogicalPlan {
+    match from {
+        BoundFromItem::Table { name, alias } => LogicalPlan::scan(&name, &alias),
+
+        BoundFromItem::Join { left, right, on } => LogicalPlan::Join(Join {
+            left: Box::new(lower_from(*left)),
+            right: Box::new(lower_from(*right)),
+            on,
+        }),
+    }
+}
+
+fn output_name(expr: &IRExpr) -> String {
     match expr {
-        Expr::Column(c) => IRExpr::col(c),
-
-        Expr::LiteralInt(i) => IRExpr::lit(Value::Int64(i)),
-
-        Expr::Binary { left, op, right } => {
-            let ir_op = match op {
-                BinaryOp::Eq => IRBinOp::Eq,
-                BinaryOp::Gt => IRBinOp::Gt,
-                BinaryOp::Lt => IRBinOp::Lt,
-                BinaryOp::And => IRBinOp::And,
-            };
-
-            IRExpr::bin(lower_expr(*left), ir_op, lower_expr(*right))
-        }
+        IRExpr::BoundColumn { name, .. } => name.clone(),
+        _ => "expr".to_string(),
     }
 }
 
@@ -143,6 +147,30 @@ Limit 5
             Lowered::Plan(plan) => {
                 let p = pretty(&plan);
                 assert!(p.contains("Sort"));
+            }
+            _ => panic!("expected plan"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod join_lowering_tests {
+    use super::*;
+    use crate::frontend::sql::parser::parse;
+    use crate::ir::pretty::pretty;
+
+    #[test]
+    fn lowers_join_into_logical_plan() {
+        let stmt = parse("SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id;");
+
+        let lowered = lower_stmt(stmt);
+
+        match lowered {
+            Lowered::Plan(plan) => {
+                let p = pretty(&plan);
+                assert!(p.contains("Join"));
+                assert!(p.contains("Scan users"));
+                assert!(p.contains("Scan orders"));
             }
             _ => panic!("expected plan"),
         }

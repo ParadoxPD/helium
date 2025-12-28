@@ -47,21 +47,15 @@ mod tests {
     use crate::common::value::Value;
     use crate::exec::operator::Operator;
     use crate::exec::scan::ScanExec;
+    use crate::exec::test_util::qrow;
     use std::collections::HashMap;
-
-    fn row(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect()
-    }
 
     #[test]
     fn limit_returns_only_n_rows() {
         let data = vec![
-            row(&[("x", Value::Int64(1))]),
-            row(&[("x", Value::Int64(2))]),
-            row(&[("x", Value::Int64(3))]),
+            qrow("t", &[("x", Value::Int64(1))]),
+            qrow("t", &[("x", Value::Int64(2))]),
+            qrow("t", &[("x", Value::Int64(3))]),
         ];
 
         let scan = ScanExec::new(data);
@@ -76,7 +70,7 @@ mod tests {
 
     #[test]
     fn limit_zero_returns_no_rows() {
-        let data = vec![row(&[("x", Value::Int64(1))])];
+        let data = vec![qrow("t", &[("x", Value::Int64(1))])];
 
         let scan = ScanExec::new(data);
         let mut limit = LimitExec::new(Box::new(scan), 0);
@@ -88,8 +82,8 @@ mod tests {
     #[test]
     fn limit_does_not_consume_extra_rows() {
         let data = vec![
-            row(&[("x", Value::Int64(1))]),
-            row(&[("x", Value::Int64(2))]),
+            qrow("t", &[("x", Value::Int64(1))]),
+            qrow("t", &[("x", Value::Int64(2))]),
         ];
 
         let scan = ScanExec::new(data);
@@ -97,7 +91,7 @@ mod tests {
 
         limit.open();
         let first = limit.next().unwrap();
-        assert_eq!(first.get("x"), Some(&Value::Int64(1)));
+        assert_eq!(first.get("t.x"), Some(&Value::Int64(1)));
 
         // Should not pull the second row
         assert!(limit.next().is_none());
@@ -106,8 +100,8 @@ mod tests {
     #[test]
     fn limit_resets_on_open() {
         let data = vec![
-            row(&[("x", Value::Int64(1))]),
-            row(&[("x", Value::Int64(2))]),
+            qrow("t", &[("x", Value::Int64(1))]),
+            qrow("t", &[("x", Value::Int64(2))]),
         ];
 
         let scan = ScanExec::new(data);

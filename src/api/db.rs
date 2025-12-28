@@ -93,19 +93,19 @@ mod tests {
             "users",
             vec![
                 row(&[
-                    ("name", Value::String("Alice".into())),
-                    ("age", Value::Int64(30)),
-                    ("score", Value::Int64(80)),
+                    ("t.name", Value::String("Alice".into())),
+                    ("t.age", Value::Int64(30)),
+                    ("t.score", Value::Int64(80)),
                 ]),
                 row(&[
-                    ("name", Value::String("Bob".into())),
-                    ("age", Value::Int64(15)),
-                    ("score", Value::Int64(90)),
+                    ("t.name", Value::String("Bob".into())),
+                    ("t.age", Value::Int64(15)),
+                    ("t.score", Value::Int64(90)),
                 ]),
                 row(&[
-                    ("name", Value::String("Carol".into())),
-                    ("age", Value::Int64(40)),
-                    ("score", Value::Int64(40)),
+                    ("t.name", Value::String("Carol".into())),
+                    ("t.age", Value::Int64(40)),
+                    ("t.score", Value::Int64(40)),
                 ]),
             ],
         );
@@ -127,18 +127,48 @@ mod tests {
             "users",
             vec![
                 row(&[
-                    ("name", Value::String("Bob".into())),
-                    ("age", Value::Int64(30)),
+                    ("t.name", Value::String("Bob".into())),
+                    ("t.age", Value::Int64(30)),
                 ]),
                 row(&[
-                    ("name", Value::String("Alice".into())),
-                    ("age", Value::Int64(20)),
+                    ("t.name", Value::String("Alice".into())),
+                    ("t.age", Value::Int64(20)),
                 ]),
             ],
         );
 
         match db.query("SELECT name FROM users ORDER BY age ASC;") {
             QueryResult::Rows(rows) => {
+                println!("ROWS = {:#?}", rows);
+                assert_eq!(rows[0].get("name"), Some(&Value::String("Alice".into())));
+            }
+            _ => panic!("expected rows"),
+        }
+    }
+
+    #[test]
+    fn sql_join_works() {
+        let mut db = Database::new();
+
+        db.insert_table(
+            "users",
+            vec![row(&[
+                ("u.id", Value::Int64(1)),
+                ("u.name", Value::String("Alice".into())),
+            ])],
+        );
+
+        db.insert_table(
+            "orders",
+            vec![row(&[
+                ("o.user_id", Value::Int64(1)),
+                ("o.amount", Value::Int64(200)),
+            ])],
+        );
+
+        match db.query("SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id;") {
+            QueryResult::Rows(rows) => {
+                assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].get("name"), Some(&Value::String("Alice".into())));
             }
             _ => panic!("expected rows"),

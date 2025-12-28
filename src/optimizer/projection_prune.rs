@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::ir::expr::{ColumnRef, Expr};
-use crate::ir::plan::{Filter, LogicalPlan, Project};
+use crate::ir::plan::{Filter, Join, LogicalPlan, Project};
 
 pub fn projection_prune(plan: &LogicalPlan) -> LogicalPlan {
     let mut required = HashSet::new();
@@ -32,6 +32,11 @@ fn collect_required_columns(plan: &LogicalPlan, required: &mut HashSet<String>) 
             collect_required_columns(&limit.input, required);
         }
         LogicalPlan::Scan(_) => {}
+        LogicalPlan::Join(join) => {
+            collect_required_columns(&join.left, required);
+            collect_required_columns(&join.right, required);
+            collect_columns(&join.on, required);
+        }
     }
 }
 
@@ -49,6 +54,7 @@ fn rewrite(plan: &LogicalPlan, required: &mut HashSet<String>) -> LogicalPlan {
 
             let rewritten_input = rewrite(&project.input, required);
 
+            // CASE 1: Project → Scan (your existing logic)
             if let LogicalPlan::Scan(mut scan) = rewritten_input {
                 let mut projected_cols = Vec::new();
                 let mut is_identity = true;
@@ -70,16 +76,60 @@ fn rewrite(plan: &LogicalPlan, required: &mut HashSet<String>) -> LogicalPlan {
                     return LogicalPlan::Scan(scan);
                 }
 
-                LogicalPlan::Project(Project {
+                return LogicalPlan::Project(Project {
                     input: Box::new(LogicalPlan::Scan(scan)),
                     exprs: kept_exprs,
-                })
-            } else {
-                LogicalPlan::Project(Project {
-                    input: Box::new(rewritten_input),
-                    exprs: kept_exprs,
-                })
+                });
             }
+
+            if let LogicalPlan::Project(inner) = &rewritten_input {
+                let outer_cols: HashSet<_> = kept_exprs.iter().map(|(_, name)| name).collect();
+
+                let inner_cols: HashSet<_> = inner.exprs.iter().map(|(_, name)| name).collect();
+
+                // If outer ⊆ inner, inner project is redundant
+                if outer_cols.is_subset(&inner_cols) {
+                    return LogicalPlan::Project(Project {
+                        exprs: kept_exprs,
+                        input: inner.input.clone(),
+                    });
+                }
+            }
+
+            if let LogicalPlan::Filter(filter) = &rewritten_input {
+                if let LogicalPlan::Project(inner_proj) = filter.input.as_ref() {
+                    let outer_cols: HashSet<String> =
+                        kept_exprs.iter().map(|(_, name)| name.clone()).collect();
+
+                    let mut filter_cols = HashSet::new();
+                    collect_columns(&filter.predicate, &mut filter_cols);
+
+                    let inner_cols: HashSet<String> = inner_proj
+                        .exprs
+                        .iter()
+                        .map(|(_, name)| name.clone())
+                        .collect();
+
+                    let needed: HashSet<String> = outer_cols.union(&filter_cols).cloned().collect();
+
+                    // If outer ∪ predicate ⊆ inner, inner project is redundant
+                    if needed.is_subset(&inner_cols) {
+                        return LogicalPlan::Project(Project {
+                            exprs: kept_exprs,
+                            input: Box::new(LogicalPlan::Filter(Filter {
+                                predicate: filter.predicate.clone(),
+                                input: inner_proj.input.clone(),
+                            })),
+                        });
+                    }
+                }
+            }
+
+            // Default case
+            LogicalPlan::Project(Project {
+                input: Box::new(rewritten_input),
+                exprs: kept_exprs,
+            })
         }
 
         LogicalPlan::Filter(filter) => LogicalPlan::Filter(Filter {
@@ -96,6 +146,11 @@ fn rewrite(plan: &LogicalPlan, required: &mut HashSet<String>) -> LogicalPlan {
         LogicalPlan::Sort(sort) => LogicalPlan::Sort(crate::ir::plan::Sort {
             input: Box::new(rewrite(&sort.input, required)),
             keys: sort.keys.clone(),
+        }),
+        LogicalPlan::Join(join) => LogicalPlan::Join(Join {
+            left: Box::new(rewrite(&join.left, required)),
+            right: Box::new(rewrite(&join.right, required)),
+            on: join.on.clone(),
         }),
     }
 }
@@ -124,20 +179,20 @@ mod tests {
 
     #[test]
     fn prunes_unused_project_fields() {
-        let plan = LogicalPlan::scan("users")
+        let plan = LogicalPlan::scan("users", "u")
             .project(vec![
-                (Expr::col("name"), "name"),
-                (Expr::col("city"), "city"),
-                (Expr::col("age"), "age"),
+                (Expr::bound_col("u", "name"), "name"),
+                (Expr::bound_col("u", "city"), "city"),
+                (Expr::bound_col("u", "age"), "age"),
             ])
             .filter(Expr::bin(
-                Expr::col("age"),
+                Expr::bound_col("u", "age"),
                 BinaryOp::Gt,
                 Expr::lit(Value::Int64(18)),
             ))
             .project(vec![
-                (Expr::col("name"), "name"),
-                (Expr::col("city"), "city"),
+                (Expr::bound_col("u", "name"), "name"),
+                (Expr::bound_col("u", "city"), "city"),
             ]);
 
         let optimized = projection_prune(&plan);
@@ -153,14 +208,17 @@ Project [name, city]
 
     #[test]
     fn keeps_columns_used_in_filter() {
-        let plan = LogicalPlan::scan("users")
-            .project(vec![(Expr::col("name"), "name"), (Expr::col("age"), "age")])
+        let plan = LogicalPlan::scan("users", "u")
+            .project(vec![
+                (Expr::bound_col("t", "name"), "name"),
+                (Expr::bound_col("t", "age"), "age"),
+            ])
             .filter(Expr::bin(
-                Expr::col("age"),
+                Expr::bound_col("t", "age"),
                 BinaryOp::Gt,
                 Expr::lit(Value::Int64(30)),
             ))
-            .project(vec![(Expr::col("name"), "name")]);
+            .project(vec![(Expr::bound_col("t", "name"), "name")]);
 
         let optimized = projection_prune(&plan);
 
@@ -172,8 +230,10 @@ Project [name, city]
 
     #[test]
     fn idempotent_projection_prune() {
-        let plan = LogicalPlan::scan("users")
-            .project(vec![(Expr::col("name"), "name"), (Expr::col("age"), "age")]);
+        let plan = LogicalPlan::scan("users", "u").project(vec![
+            (Expr::bound_col("t", "name"), "name"),
+            (Expr::bound_col("t", "age"), "age"),
+        ]);
 
         let once = projection_prune(&plan);
         let twice = projection_prune(&once);

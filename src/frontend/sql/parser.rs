@@ -25,6 +25,28 @@ pub fn parse(sql: &str) -> Statement {
     Statement::Select(parse_select(&mut parts))
 }
 
+fn parse_table<'a, I>(parts: &mut std::iter::Peekable<I>) -> FromItem
+where
+    I: Iterator<Item = &'a str>,
+{
+    let name = parts.next().expect("table name").to_string();
+
+    let alias = match parts.peek() {
+        Some(&tok)
+            if tok != "JOIN"
+                && tok != "ON"
+                && tok != "WHERE"
+                && tok != "ORDER"
+                && tok != "LIMIT" =>
+        {
+            Some(parts.next().unwrap().to_string())
+        }
+        _ => None,
+    };
+
+    FromItem::Table { name, alias }
+}
+
 pub fn parse_select<'a, I>(mut parts: &mut std::iter::Peekable<I>) -> SelectStmt
 where
     I: Iterator<Item = &'a str>,
@@ -41,7 +63,24 @@ where
     }
 
     assert_eq!(parts.next(), Some("FROM"));
-    let table = parts.next().unwrap().to_string();
+    let mut from = parse_table(&mut parts);
+
+    // Handle JOIN chains
+    while parts.peek() == Some(&"JOIN") {
+        parts.next(); // consume JOIN
+
+        let right = parse_table(&mut parts);
+
+        assert_eq!(parts.next(), Some("ON"));
+
+        let on = parse_simple_predicate(&mut parts);
+
+        from = FromItem::Join {
+            left: Box::new(from),
+            right: Box::new(right),
+            on,
+        };
+    }
 
     let mut where_clause = None;
     let mut order_by = Vec::new();
@@ -113,7 +152,7 @@ where
 
     SelectStmt {
         columns,
-        table,
+        from,
         where_clause,
         order_by,
         limit,
@@ -124,21 +163,27 @@ fn parse_simple_predicate<'a, I>(parts: &mut std::iter::Peekable<I>) -> Expr
 where
     I: Iterator<Item = &'a str>,
 {
-    let left = parts.next().expect("lhs");
-    let op = parts.next().expect("op");
-    let right = parts.next().expect("rhs");
+    let left = Expr::Column(parts.next().unwrap().to_string());
 
-    let bin_op = match op {
+    let op = match parts.next().unwrap() {
         "=" => BinaryOp::Eq,
         ">" => BinaryOp::Gt,
         "<" => BinaryOp::Lt,
         _ => panic!("unsupported operator"),
     };
 
+    let rhs_tok = parts.next().unwrap();
+
+    let right = if let Ok(v) = rhs_tok.parse::<i64>() {
+        Expr::LiteralInt(v)
+    } else {
+        Expr::Column(rhs_tok.to_string())
+    };
+
     Expr::Binary {
-        left: Box::new(Expr::Column(left.into())),
-        op: bin_op,
-        right: Box::new(Expr::LiteralInt(right.parse().unwrap())),
+        left: Box::new(left),
+        op,
+        right: Box::new(right),
     }
 }
 
@@ -167,6 +212,48 @@ mod tests {
                 assert!(!s.order_by[0].asc);
                 assert!(s.order_by[1].asc);
             }
+            _ => panic!("expected select"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod join_tests {
+    use super::*;
+    use crate::frontend::sql::ast::{FromItem, Statement};
+
+    #[test]
+    fn parses_simple_join() {
+        let stmt = parse("SELECT name FROM users u JOIN orders o ON u.id = o.user_id;");
+
+        match stmt {
+            Statement::Select(s) => match s.from {
+                FromItem::Join { left, right, .. } => {
+                    assert!(matches!(*left, FromItem::Table { .. }));
+                    assert!(matches!(*right, FromItem::Table { .. }));
+                }
+                _ => panic!("expected join"),
+            },
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parses_chained_joins() {
+        let stmt = parse(
+            "SELECT name FROM users u \
+             JOIN orders o ON u.id = o.user_id \
+             JOIN payments p ON o.id = p.order_id;",
+        );
+
+        match stmt {
+            Statement::Select(s) => match s.from {
+                FromItem::Join { left, .. } => {
+                    // left itself should be another join
+                    assert!(matches!(*left, FromItem::Join { .. }));
+                }
+                _ => panic!("expected join"),
+            },
             _ => panic!("expected select"),
         }
     }

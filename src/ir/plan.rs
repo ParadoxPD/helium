@@ -7,11 +7,13 @@ pub enum LogicalPlan {
     Project(Project),
     Sort(Sort),
     Limit(Limit),
+    Join(Join),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Scan {
     pub table: String,
+    pub alias: String,
     pub columns: Vec<String>,
 }
 
@@ -39,6 +41,13 @@ pub struct Sort {
     pub keys: Vec<(Expr, bool)>, // (expr, asc)
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Join {
+    pub left: Box<LogicalPlan>,
+    pub right: Box<LogicalPlan>,
+    pub on: Expr,
+}
+
 impl Limit {
     pub fn clone_with_input(&self, input: LogicalPlan) -> Self {
         Self {
@@ -49,9 +58,10 @@ impl Limit {
 }
 
 impl LogicalPlan {
-    pub fn scan(table: impl Into<String>) -> Self {
+    pub fn scan(table: impl Into<String>, alias: impl Into<String>) -> Self {
         LogicalPlan::Scan(Scan {
             table: table.into(),
+            alias: alias.into(),
             columns: Vec::new(),
         })
     }
@@ -91,6 +101,7 @@ impl LogicalPlan {
             LogicalPlan::Project(_) => 1,
             LogicalPlan::Sort(_) => 1,
             LogicalPlan::Limit(_) => 1,
+            LogicalPlan::Join(_) => 2,
         }
     }
 
@@ -100,6 +111,7 @@ impl LogicalPlan {
             LogicalPlan::Project(p) => Some(&p.input),
             LogicalPlan::Limit(l) => Some(&l.input),
             LogicalPlan::Sort(s) => Some(&s.input),
+            LogicalPlan::Join(_) => None,
             LogicalPlan::Scan(_) => None,
         }
     }
@@ -113,7 +125,7 @@ mod tests {
 
     #[test]
     fn scan_has_no_children() {
-        let plan = LogicalPlan::scan("users");
+        let plan = LogicalPlan::scan("users", "u");
 
         assert_eq!(plan.arity(), 0);
         assert!(plan.input().is_none());
@@ -121,8 +133,8 @@ mod tests {
 
     #[test]
     fn filter_wraps_input() {
-        let plan = LogicalPlan::scan("users").filter(Expr::bin(
-            Expr::col("age"),
+        let plan = LogicalPlan::scan("users", "u").filter(Expr::bin(
+            Expr::bound_col("t", "age"),
             BinaryOp::Gt,
             Expr::lit(Value::Int64(18)),
         ));
@@ -133,9 +145,9 @@ mod tests {
 
     #[test]
     fn project_preserves_structure() {
-        let plan = LogicalPlan::scan("users").project(vec![
-            (Expr::col("name"), "name"),
-            (Expr::col("city"), "city"),
+        let plan = LogicalPlan::scan("users", "u").project(vec![
+            (Expr::bound_col("t", "name"), "name"),
+            (Expr::bound_col("t", "city"), "city"),
         ]);
 
         match plan {
@@ -149,8 +161,8 @@ mod tests {
 
     #[test]
     fn limit_wraps_project() {
-        let plan = LogicalPlan::scan("users")
-            .project(vec![(Expr::col("name"), "name")])
+        let plan = LogicalPlan::scan("users", "u")
+            .project(vec![(Expr::bound_col("t", "name"), "name")])
             .limit(10);
 
         match plan {
@@ -168,13 +180,13 @@ mod tests {
 
     #[test]
     fn chaining_builds_correct_tree_shape() {
-        let plan = LogicalPlan::scan("users")
+        let plan = LogicalPlan::scan("users", "u")
             .filter(Expr::bin(
-                Expr::col("active"),
+                Expr::bound_col("t", "active"),
                 BinaryOp::Eq,
                 Expr::lit(Value::Bool(true)),
             ))
-            .project(vec![(Expr::col("email"), "email")])
+            .project(vec![(Expr::bound_col("t", "email"), "email")])
             .limit(5);
 
         // Limit

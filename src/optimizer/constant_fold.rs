@@ -1,6 +1,6 @@
 use crate::common::value::Value;
 use crate::ir::expr::{BinaryOp, Expr, UnaryOp};
-use crate::ir::plan::{Filter, LogicalPlan, Project};
+use crate::ir::plan::{Filter, Join, LogicalPlan, Project};
 
 pub fn constant_fold(plan: &LogicalPlan) -> LogicalPlan {
     match plan {
@@ -26,12 +26,17 @@ pub fn constant_fold(plan: &LogicalPlan) -> LogicalPlan {
                 .collect(),
         }),
         LogicalPlan::Limit(limit) => LogicalPlan::Limit(limit.clone()),
+        LogicalPlan::Join(join) => LogicalPlan::Join(Join {
+            left: Box::new(constant_fold(&join.left)),
+            right: Box::new(constant_fold(&join.right)),
+            on: fold_expr(&join.on),
+        }),
     }
 }
 
 pub fn fold_expr(expr: &Expr) -> Expr {
     match expr {
-        Expr::Literal(_) | Expr::Column(_) | Expr::Null => expr.clone(),
+        Expr::Literal(_) | Expr::Column(_) | Expr::Null | Expr::BoundColumn { .. } => expr.clone(),
         Expr::Unary { op, expr } => {
             let folded = fold_expr(expr);
 
@@ -112,7 +117,7 @@ mod tests {
 
     #[test]
     fn does_not_fold_column_expressions() {
-        let expr = Expr::bin(Expr::col("age"), BinaryOp::Add, Expr::lit(Value::Int64(1)));
+        let expr = Expr::bin(Expr::bound_col("t", "age"), BinaryOp::Add, Expr::lit(Value::Int64(1)));
 
         let folded = fold_expr(&expr);
         assert_eq!(folded, expr);
@@ -132,7 +137,7 @@ mod tests {
 
     #[test]
     fn folds_filter_predicate_in_plan() {
-        let plan = LogicalPlan::scan("users").filter(Expr::bin(
+        let plan = LogicalPlan::scan("users", "u").filter(Expr::bin(
             Expr::bin(
                 Expr::lit(Value::Int64(10)),
                 BinaryOp::Gt,
@@ -154,7 +159,7 @@ Filter (true)
 
     #[test]
     fn optimizer_is_idempotent() {
-        let plan = LogicalPlan::scan("users").filter(Expr::bin(
+        let plan = LogicalPlan::scan("users", "u").filter(Expr::bin(
             Expr::lit(Value::Int64(1)),
             BinaryOp::Eq,
             Expr::lit(Value::Int64(1)),

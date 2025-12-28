@@ -1,4 +1,4 @@
-use crate::ir::plan::{Filter, LogicalPlan, Project};
+use crate::ir::plan::{Filter, Join, LogicalPlan, Project};
 
 pub fn predicate_pushdown(plan: &LogicalPlan) -> LogicalPlan {
     match plan {
@@ -14,6 +14,11 @@ pub fn predicate_pushdown(plan: &LogicalPlan) -> LogicalPlan {
 
         LogicalPlan::Limit(limit) => LogicalPlan::Limit(limit.clone()),
         LogicalPlan::Scan(_) => plan.clone(),
+        LogicalPlan::Join(join) => LogicalPlan::Join(Join {
+            left: Box::new(predicate_pushdown(&join.left)),
+            right: Box::new(predicate_pushdown(&join.right)),
+            on: join.on.clone(),
+        }),
     }
 }
 
@@ -46,10 +51,10 @@ mod tests {
 
     #[test]
     fn pushes_filter_below_project() {
-        let plan = LogicalPlan::scan("users")
-            .project(vec![(Expr::col("name"), "name")])
+        let plan = LogicalPlan::scan("users", "u")
+            .project(vec![(Expr::bound_col("t", "name"), "name")])
             .filter(Expr::bin(
-                Expr::col("age"),
+                Expr::bound_col("t", "age"),
                 BinaryOp::Gt,
                 Expr::lit(Value::Int64(18)),
             ));
@@ -67,8 +72,8 @@ Project [name]
 
     #[test]
     fn does_not_push_filter_below_limit() {
-        let plan = LogicalPlan::scan("users").limit(10).filter(Expr::bin(
-            Expr::col("age"),
+        let plan = LogicalPlan::scan("users", "u").limit(10).filter(Expr::bin(
+            Expr::bound_col("t", "age"),
             BinaryOp::Gt,
             Expr::lit(Value::Int64(18)),
         ));
@@ -87,7 +92,7 @@ Filter (age Gt 18)
 
     #[test]
     fn preserves_non_pushable_structure() {
-        let plan = LogicalPlan::scan("users");
+        let plan = LogicalPlan::scan("users", "u");
 
         let optimized = predicate_pushdown(&plan);
 
@@ -96,10 +101,10 @@ Filter (age Gt 18)
 
     #[test]
     fn optimizer_is_idempotent() {
-        let plan = LogicalPlan::scan("users")
-            .project(vec![(Expr::col("name"), "name")])
+        let plan = LogicalPlan::scan("users", "u")
+            .project(vec![(Expr::bound_col("t", "name"), "name")])
             .filter(Expr::bin(
-                Expr::col("age"),
+                Expr::bound_col("t", "age"),
                 BinaryOp::Gt,
                 Expr::lit(Value::Int64(18)),
             ));

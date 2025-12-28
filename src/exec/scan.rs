@@ -24,6 +24,12 @@ impl Operator for ScanExec {
 
         let row = self.data[self.cursor].clone();
         self.cursor += 1;
+        debug_assert!(
+            row.keys().all(|k| k.contains('.')),
+            "ScanExec produced unqualified row: {:?}",
+            row
+        );
+
         Some(row)
     }
 
@@ -38,11 +44,11 @@ mod tests {
     #[test]
     fn scan_returns_all_rows() {
         let data = vec![
-            [("id", Value::Int64(1))]
+            [("t.id", Value::Int64(1))]
                 .into_iter()
                 .map(|(k, v)| (k.into(), v))
                 .collect(),
-            [("id", Value::Int64(2))]
+            [("t.id", Value::Int64(2))]
                 .into_iter()
                 .map(|(k, v)| (k.into(), v))
                 .collect(),

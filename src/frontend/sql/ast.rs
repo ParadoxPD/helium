@@ -7,7 +7,7 @@ pub enum Statement {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectStmt {
     pub columns: Vec<String>,
-    pub table: String,
+    pub from: FromItem,
     pub where_clause: Option<Expr>,
     pub order_by: Vec<OrderByExpr>,
     pub limit: Option<usize>,
@@ -36,4 +36,17 @@ pub enum BinaryOp {
     Gt,
     Lt,
     And,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FromItem {
+    Table {
+        name: String,
+        alias: Option<String>,
+    },
+    Join {
+        left: Box<FromItem>,
+        right: Box<FromItem>,
+        on: Expr,
+    },
 }

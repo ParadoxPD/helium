@@ -1,15 +1,20 @@
 pub mod expr_eval;
 pub mod filter;
+pub mod join;
 pub mod limit;
 pub mod operator;
 pub mod project;
 pub mod scan;
 pub mod sort;
 
+#[cfg(test)]
+pub mod test_util;
+
 use std::collections::HashMap;
 
 use crate::common::value::Value;
 use crate::exec::filter::FilterExec;
+use crate::exec::join::JoinExec;
 use crate::exec::limit::LimitExec;
 use crate::exec::operator::{Operator, Row};
 use crate::exec::project::ProjectExec;
@@ -22,8 +27,22 @@ pub type Catalog = HashMap<String, Vec<Row>>;
 pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
     match plan {
         LogicalPlan::Scan(scan) => {
-            let data = catalog.get(&scan.table).cloned().unwrap_or_default();
-            Box::new(ScanExec::new(data))
+            let raw = catalog.get(&scan.table).unwrap();
+
+            let rewritten = raw
+                .iter()
+                .map(|row| {
+                    let mut out = Row::new();
+                    for (k, v) in row {
+                        // k is "users.name"
+                        let col = k.split('.').last().unwrap();
+                        out.insert(format!("{}.{}", scan.alias, col), v.clone());
+                    }
+                    out
+                })
+                .collect();
+
+            Box::new(ScanExec::new(rewritten))
         }
 
         LogicalPlan::Filter(filter) => {
@@ -45,6 +64,12 @@ pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
             let input = lower(&limit.input, catalog);
             Box::new(LimitExec::new(input, limit.count))
         }
+        LogicalPlan::Join(join) => {
+            let left = lower(&join.left, catalog);
+            let right = lower(&join.right, catalog);
+
+            Box::new(JoinExec::new(left, right, join.on.clone()))
+        }
     }
 }
 
@@ -52,15 +77,9 @@ pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
 mod tests {
     use super::*;
     use crate::common::value::Value;
+    use crate::exec::test_util::qrow;
     use crate::ir::expr::{BinaryOp, Expr};
     use crate::ir::plan::LogicalPlan;
-
-    fn row(pairs: &[(&str, Value)]) -> Row {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect()
-    }
 
     #[test]
     fn execute_simple_scan() {
@@ -68,12 +87,12 @@ mod tests {
         catalog.insert(
             "users".into(),
             vec![
-                row(&[("id", Value::Int64(1))]),
-                row(&[("id", Value::Int64(2))]),
+                qrow("t", &[("id", Value::Int64(1))]),
+                qrow("t", &[("id", Value::Int64(2))]),
             ],
         );
 
-        let plan = LogicalPlan::scan("users");
+        let plan = LogicalPlan::scan("users", "u");
         let mut exec = lower(&plan, &catalog);
 
         exec.open();
@@ -88,28 +107,37 @@ mod tests {
         catalog.insert(
             "users".into(),
             vec![
-                row(&[
-                    ("name", Value::String("Alice".into())),
-                    ("age", Value::Int64(30)),
-                ]),
-                row(&[
-                    ("name", Value::String("Bob".into())),
-                    ("age", Value::Int64(15)),
-                ]),
-                row(&[
-                    ("name", Value::String("Carol".into())),
-                    ("age", Value::Int64(40)),
-                ]),
+                qrow(
+                    "u",
+                    &[
+                        ("name", Value::String("Alice".into())),
+                        ("age", Value::Int64(30)),
+                    ],
+                ),
+                qrow(
+                    "u",
+                    &[
+                        ("name", Value::String("Bob".into())),
+                        ("age", Value::Int64(15)),
+                    ],
+                ),
+                qrow(
+                    "u",
+                    &[
+                        ("name", Value::String("Carol".into())),
+                        ("age", Value::Int64(40)),
+                    ],
+                ),
             ],
         );
 
-        let plan = LogicalPlan::scan("users")
+        let plan = LogicalPlan::scan("users", "u")
             .filter(Expr::bin(
-                Expr::col("age"),
+                Expr::bound_col("u", "age"),
                 BinaryOp::Gt,
                 Expr::lit(Value::Int64(18)),
             ))
-            .project(vec![(Expr::col("name"), "name")])
+            .project(vec![(Expr::bound_col("u", "name"), "name")])
             .limit(2);
 
         let mut exec = lower(&plan, &catalog);
@@ -129,15 +157,15 @@ mod tests {
         catalog.insert(
             "users".into(),
             vec![
-                row(&[("x", Value::Int64(1))]),
-                row(&[("x", Value::Int64(2))]),
-                row(&[("x", Value::Int64(3))]),
+                qrow("u", &[("x", Value::Int64(1))]),
+                qrow("u", &[("x", Value::Int64(2))]),
+                qrow("u", &[("x", Value::Int64(3))]),
             ],
         );
 
-        let plan = LogicalPlan::scan("users")
+        let plan = LogicalPlan::scan("users", "u")
             .filter(Expr::bin(
-                Expr::col("x"),
+                Expr::bound_col("u", "x"),
                 BinaryOp::Gt,
                 Expr::lit(Value::Int64(1)),
             ))
@@ -147,7 +175,7 @@ mod tests {
         exec.open();
 
         let row = exec.next().unwrap();
-        assert_eq!(row.get("x"), Some(&Value::Int64(2)));
+        assert_eq!(row.get("u.x"), Some(&Value::Int64(2)));
         assert!(exec.next().is_none());
     }
 }

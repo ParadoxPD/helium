@@ -58,6 +58,11 @@ pub enum Expr {
 
     Literal(Value),
 
+    BoundColumn {
+        table: String,
+        name: String,
+    },
+
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,
@@ -75,6 +80,13 @@ pub enum Expr {
 impl Expr {
     pub fn col(name: impl Into<String>) -> Self {
         Expr::Column(ColumnRef::unresolved(name))
+    }
+
+    pub fn bound_col(table: impl Into<String>, name: impl Into<String>) -> Self {
+        Expr::BoundColumn {
+            table: table.into(),
+            name: name.into(),
+        }
     }
 
     pub fn lit(value: Value) -> Self {
@@ -100,6 +112,7 @@ impl Expr {
         match self {
             Expr::Literal(_) | Expr::Null => true,
             Expr::Column(_) => false,
+            Expr::BoundColumn { .. } => false,
             Expr::Unary { expr, .. } => expr.is_constant(),
             Expr::Binary { left, right, .. } => left.is_constant() && right.is_constant(),
         }
@@ -124,6 +137,9 @@ impl fmt::Display for Expr {
             Expr::Binary { left, op, right } => {
                 write!(f, "{} {:?} {}", left, op, right)
             }
+            Expr::BoundColumn { name, .. } => {
+                write!(f, "{}", name)
+            }
         }
     }
 }
@@ -141,7 +157,7 @@ mod tests {
 
     #[test]
     fn column_is_not_constant() {
-        let expr = Expr::col("age");
+        let expr = Expr::bound_col("t", "age");
         assert!(!expr.is_constant());
     }
 
@@ -159,7 +175,7 @@ mod tests {
     #[test]
     fn binary_mixed_expression_not_constant() {
         let expr = Expr::bin(
-            Expr::col("salary"),
+            Expr::bound_col("t", "salary"),
             BinaryOp::Gt,
             Expr::lit(Value::Int64(1000)),
         );
@@ -193,7 +209,11 @@ mod tests {
 
     #[test]
     fn display_simple_binary_expr() {
-        let expr = Expr::bin(Expr::col("age"), BinaryOp::Gt, Expr::lit(Value::Int64(18)));
+        let expr = Expr::bin(
+            Expr::bound_col("t", "age"),
+            BinaryOp::Gt,
+            Expr::lit(Value::Int64(18)),
+        );
 
         let printed = format!("{expr}");
         assert!(printed.contains("age"));
@@ -204,7 +224,11 @@ mod tests {
     #[test]
     fn nested_expression_structure() {
         let expr = Expr::bin(
-            Expr::bin(Expr::col("a"), BinaryOp::Add, Expr::lit(Value::Int64(1))),
+            Expr::bin(
+                Expr::bound_col("t", "a"),
+                BinaryOp::Add,
+                Expr::lit(Value::Int64(1)),
+            ),
             BinaryOp::Mul,
             Expr::lit(Value::Int64(2)),
         );

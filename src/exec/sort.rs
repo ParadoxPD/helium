@@ -74,26 +74,20 @@ mod tests {
     use crate::common::value::Value;
     use crate::exec::operator::Row;
     use crate::exec::scan::ScanExec;
+    use crate::exec::test_util::qrow;
     use crate::ir::expr::Expr;
-
-    fn row(pairs: &[(&str, Value)]) -> Row {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect()
-    }
 
     #[test]
     fn sort_orders_rows() {
         let data = vec![
-            row(&[("age", Value::Int64(30))]),
-            row(&[("age", Value::Int64(10))]),
+            qrow("t", &[("age", Value::Int64(30))]),
+            qrow("t", &[("age", Value::Int64(10))]),
         ];
 
         let scan = ScanExec::new(data);
-        let mut sort = SortExec::new(Box::new(scan), vec![(Expr::col("age"), true)]);
+        let mut sort = SortExec::new(Box::new(scan), vec![(Expr::bound_col("t", "age"), true)]);
 
         sort.open();
-        assert_eq!(sort.next().unwrap().get("age"), Some(&Value::Int64(10)));
+        assert_eq!(sort.next().unwrap().get("t.age"), Some(&Value::Int64(10)));
     }
 }

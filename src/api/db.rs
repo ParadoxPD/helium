@@ -12,6 +12,7 @@ pub struct Database {
     catalog: Catalog,
 }
 
+#[derive(Debug)]
 pub enum QueryResult {
     Rows(Vec<Row>),
     Explain(String),
@@ -49,7 +50,7 @@ impl Database {
                 let plan = optimize(&plan);
 
                 if !analyze {
-                    QueryResult::Explain(pretty(&plan));
+                    return QueryResult::Explain(pretty(&plan));
                 }
 
                 let start = std::time::Instant::now();

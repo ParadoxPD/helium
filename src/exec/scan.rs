@@ -1,4 +1,3 @@
-use crate::common::value::Value;
 use crate::exec::operator::{Operator, Row};
 
 pub struct ScanExec {
@@ -39,7 +38,7 @@ impl Operator for ScanExec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::exec::operator::Operator;
+    use crate::{common::value::Value, exec::operator::Operator};
 
     #[test]
     fn scan_returns_all_rows() {

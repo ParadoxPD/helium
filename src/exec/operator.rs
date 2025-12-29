@@ -1,6 +1,5 @@
 use crate::common::value::Value;
 use std::collections::HashMap;
-use std::time::Instant;
 
 pub type Row = HashMap<String, Value>;
 

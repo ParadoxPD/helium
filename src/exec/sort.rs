@@ -1,7 +1,6 @@
 use crate::common::value::Value;
 use crate::exec::expr_eval::eval_value;
 use crate::exec::operator::{Operator, Row};
-use crate::exec::scan::ScanExec;
 use crate::ir::expr::Expr;
 
 pub struct SortExec {
@@ -72,7 +71,6 @@ fn compare_rows(a: &Row, b: &Row, keys: &[(Expr, bool)]) -> std::cmp::Ordering {
 mod tests {
     use super::*;
     use crate::common::value::Value;
-    use crate::exec::operator::Row;
     use crate::exec::scan::ScanExec;
     use crate::exec::test_util::qrow;
     use crate::ir::expr::Expr;

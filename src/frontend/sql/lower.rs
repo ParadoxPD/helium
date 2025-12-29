@@ -1,7 +1,5 @@
-use crate::common::value::Value;
-use crate::frontend::sql::ast::FromItem;
 use crate::frontend::sql::binder::{Binder, BoundFromItem, BoundSelect};
-use crate::ir::expr::{BinaryOp as IRBinOp, Expr as IRExpr};
+use crate::ir::expr::Expr as IRExpr;
 use crate::ir::plan::{Join, LogicalPlan, Sort};
 
 use super::ast::*;

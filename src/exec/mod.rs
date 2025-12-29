@@ -12,7 +12,6 @@ pub mod test_util;
 
 use std::collections::HashMap;
 
-use crate::common::value::Value;
 use crate::exec::filter::FilterExec;
 use crate::exec::join::JoinExec;
 use crate::exec::limit::LimitExec;

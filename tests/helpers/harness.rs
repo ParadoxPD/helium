@@ -5,6 +5,7 @@ pub struct TestDB {
     db: Database,
 }
 
+#[allow(dead_code)]
 impl TestDB {
     pub fn new() -> Self {
         Self {
@@ -37,3 +38,4 @@ impl TestDB {
         }
     }
 }
+

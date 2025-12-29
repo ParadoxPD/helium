@@ -22,7 +22,7 @@ fn select_where_limit() {
 }
 
 #[test]
-#[ignore] // AND / OR / parentheses not fully done yet
+#[ignore = "AND / OR / parentheses not fully done yet"]
 fn complex_predicates() {
     let mut db = TestDB::new();
     db.register_table("users", users());
@@ -38,3 +38,4 @@ fn complex_predicates() {
 
     assert_eq!(rows.len(), 2);
 }
+

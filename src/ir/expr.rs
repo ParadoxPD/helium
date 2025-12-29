@@ -1,6 +1,5 @@
 use std::fmt;
 
-use crate::common::types::DataType;
 use crate::common::value::Value;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

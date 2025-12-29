@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use crate::common::value::Value;
 use crate::exec::operator::Row;
 use crate::exec::{Catalog, lower};
 use crate::frontend::sql::lower::Lowered;

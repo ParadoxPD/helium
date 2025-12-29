@@ -48,7 +48,6 @@ mod tests {
     use crate::exec::operator::Operator;
     use crate::exec::scan::ScanExec;
     use crate::exec::test_util::qrow;
-    use std::collections::HashMap;
 
     #[test]
     fn limit_returns_only_n_rows() {

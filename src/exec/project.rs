@@ -1,7 +1,6 @@
-use crate::common::value::Value;
 use crate::exec::expr_eval::eval_value;
 use crate::exec::operator::{Operator, Row};
-use crate::ir::expr::{BinaryOp, Expr, UnaryOp};
+use crate::ir::expr::Expr;
 
 pub struct ProjectExec {
     input: Box<dyn Operator>,
@@ -21,15 +20,17 @@ impl Operator for ProjectExec {
 
     fn next(&mut self) -> Option<Row> {
         let row = self.input.next()?;
-        println!("PROJECT input row = {:?}", row);
         let mut out = Row::new();
 
         for (expr, alias) in &self.exprs {
-            println!("PROJECT expr = {:?}", expr);
             let value = eval_value(expr, &row);
             out.insert(alias.clone(), value);
         }
-        println!("PROJECT output row = {:?}", out);
+
+        debug_assert!(
+            out.keys().all(|k| !k.contains('.')),
+            "Project output must be unqualified"
+        );
 
         Some(out)
     }

@@ -83,7 +83,7 @@ pub fn fold_expr(expr: &Expr) -> Expr {
 mod tests {
     use super::*;
     use crate::common::value::Value;
-    use crate::ir::expr::{BinaryOp, Expr, UnaryOp};
+    use crate::ir::expr::{BinaryOp, Expr};
     use crate::ir::plan::LogicalPlan;
     use crate::ir::pretty::pretty;
 
@@ -117,7 +117,11 @@ mod tests {
 
     #[test]
     fn does_not_fold_column_expressions() {
-        let expr = Expr::bin(Expr::bound_col("t", "age"), BinaryOp::Add, Expr::lit(Value::Int64(1)));
+        let expr = Expr::bin(
+            Expr::bound_col("t", "age"),
+            BinaryOp::Add,
+            Expr::lit(Value::Int64(1)),
+        );
 
         let folded = fold_expr(&expr);
         assert_eq!(folded, expr);

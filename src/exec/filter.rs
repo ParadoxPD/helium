@@ -1,7 +1,6 @@
-use crate::common::value::Value;
 use crate::exec::expr_eval::eval_predicate;
 use crate::exec::operator::{Operator, Row};
-use crate::ir::expr::{BinaryOp, Expr};
+use crate::ir::expr::Expr;
 
 pub struct FilterExec {
     input: Box<dyn Operator>,

@@ -1,6 +1,7 @@
 use helium::common::value::Value;
 use helium::exec::operator::Row;
 
+#[allow(dead_code)]
 pub fn users() -> Vec<Row> {
     vec![
         row(&[
@@ -18,6 +19,7 @@ pub fn users() -> Vec<Row> {
     ]
 }
 
+#[allow(dead_code)]
 pub fn orders() -> Vec<Row> {
     vec![
         row(&[

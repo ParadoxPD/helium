@@ -3,7 +3,7 @@ mod helpers;
 use helpers::{data::*, harness::TestDB};
 
 #[test]
-#[ignore] // needs execution stats
+#[ignore = "needs execution stats"]
 fn limit_short_circuits_execution() {
     let mut db = TestDB::new();
     db.register_table("users", users());
@@ -18,4 +18,3 @@ fn limit_short_circuits_execution() {
 
     assert!(stats.contains("rows=1"));
 }
-

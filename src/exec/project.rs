@@ -42,12 +42,15 @@ impl Operator for ProjectExec {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::common::value::Value;
     use crate::exec::operator::Operator;
     use crate::exec::scan::ScanExec;
     use crate::exec::test_util::qrow;
     use crate::ir::expr::{BinaryOp, Expr};
+    use crate::storage::in_memory::InMemoryTable;
 
     #[test]
     fn project_selects_columns() {
@@ -59,7 +62,7 @@ mod tests {
             ],
         )];
 
-        let scan = ScanExec::new(data);
+        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
         let mut project = ProjectExec::new(
             Box::new(scan),
             vec![(
@@ -82,7 +85,7 @@ mod tests {
     fn project_computes_expressions() {
         let data = vec![qrow("t", &[("age", Value::Int64(20))])];
 
-        let scan = ScanExec::new(data);
+        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
 
         let expr = Expr::bin(
             Expr::bound_col("t", "age"),
@@ -102,7 +105,7 @@ mod tests {
     fn project_handles_missing_column_as_null() {
         let data = vec![qrow("t", &[("name", Value::String("Bob".into()))])];
 
-        let scan = ScanExec::new(data);
+        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
 
         let mut project = ProjectExec::new(
             Box::new(scan),
@@ -122,7 +125,7 @@ mod tests {
             qrow("t", &[("x", Value::Int64(2))]),
         ];
 
-        let scan = ScanExec::new(data);
+        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
 
         let mut project = ProjectExec::new(
             Box::new(scan),

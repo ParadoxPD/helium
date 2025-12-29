@@ -95,12 +95,15 @@ impl Operator for JoinExec {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::common::value::Value;
     use crate::exec::operator::Operator;
     use crate::exec::scan::ScanExec;
     use crate::exec::test_util::qrow;
     use crate::ir::expr::{BinaryOp, Expr};
+    use crate::storage::in_memory::InMemoryTable;
 
     #[test]
     fn join_matches_rows() {
@@ -132,8 +135,8 @@ mod tests {
             ),
         ];
 
-        let left = ScanExec::new(left_data);
-        let right = ScanExec::new(right_data);
+        let left = ScanExec::new(Arc::new(InMemoryTable::new("u".into(), left_data)));
+        let right = ScanExec::new(Arc::new(InMemoryTable::new("o".into(), right_data)));
 
         let on = Expr::bin(
             Expr::bound_col("u", "id"),

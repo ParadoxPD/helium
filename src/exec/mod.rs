@@ -1,3 +1,4 @@
+pub mod alias;
 pub mod expr_eval;
 pub mod filter;
 pub mod join;
@@ -11,7 +12,9 @@ pub mod sort;
 pub mod test_util;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use crate::exec::alias::AliasExec;
 use crate::exec::filter::FilterExec;
 use crate::exec::join::JoinExec;
 use crate::exec::limit::LimitExec;
@@ -20,28 +23,21 @@ use crate::exec::project::ProjectExec;
 use crate::exec::scan::ScanExec;
 use crate::exec::sort::SortExec;
 use crate::ir::plan::LogicalPlan;
+use crate::storage::table::Table;
 
-pub type Catalog = HashMap<String, Vec<Row>>;
+pub type Catalog = HashMap<String, Arc<dyn Table>>;
 
 pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
     match plan {
         LogicalPlan::Scan(scan) => {
-            let raw = catalog.get(&scan.table).unwrap();
+            let table = catalog.get(&scan.table).expect("table not found").clone();
 
-            let rewritten = raw
-                .iter()
-                .map(|row| {
-                    let mut out = Row::new();
-                    for (k, v) in row {
-                        // k is "users.name"
-                        let col = k.split('.').last().unwrap();
-                        out.insert(format!("{}.{}", scan.alias, col), v.clone());
-                    }
-                    out
-                })
-                .collect();
-
-            Box::new(ScanExec::new(rewritten))
+            let scan_exec = ScanExec::new(table);
+            Box::new(AliasExec::new(
+                Box::new(scan_exec),
+                scan.table.clone(),
+                scan.alias.clone(),
+            ))
         }
 
         LogicalPlan::Filter(filter) => {
@@ -79,16 +75,20 @@ mod tests {
     use crate::exec::test_util::qrow;
     use crate::ir::expr::{BinaryOp, Expr};
     use crate::ir::plan::LogicalPlan;
+    use crate::storage::in_memory::InMemoryTable;
 
     #[test]
     fn execute_simple_scan() {
         let mut catalog = Catalog::new();
         catalog.insert(
             "users".into(),
-            vec![
-                qrow("t", &[("id", Value::Int64(1))]),
-                qrow("t", &[("id", Value::Int64(2))]),
-            ],
+            Arc::new(InMemoryTable::new(
+                "users".into(),
+                vec![
+                    qrow("t", &[("id", Value::Int64(1))]),
+                    qrow("t", &[("id", Value::Int64(2))]),
+                ],
+            )),
         );
 
         let plan = LogicalPlan::scan("users", "u");
@@ -105,29 +105,32 @@ mod tests {
         let mut catalog = Catalog::new();
         catalog.insert(
             "users".into(),
-            vec![
-                qrow(
-                    "u",
-                    &[
-                        ("name", Value::String("Alice".into())),
-                        ("age", Value::Int64(30)),
-                    ],
-                ),
-                qrow(
-                    "u",
-                    &[
-                        ("name", Value::String("Bob".into())),
-                        ("age", Value::Int64(15)),
-                    ],
-                ),
-                qrow(
-                    "u",
-                    &[
-                        ("name", Value::String("Carol".into())),
-                        ("age", Value::Int64(40)),
-                    ],
-                ),
-            ],
+            Arc::new(InMemoryTable::new(
+                "users".into(),
+                vec![
+                    qrow(
+                        "u",
+                        &[
+                            ("name", Value::String("Alice".into())),
+                            ("age", Value::Int64(30)),
+                        ],
+                    ),
+                    qrow(
+                        "u",
+                        &[
+                            ("name", Value::String("Bob".into())),
+                            ("age", Value::Int64(15)),
+                        ],
+                    ),
+                    qrow(
+                        "u",
+                        &[
+                            ("name", Value::String("Carol".into())),
+                            ("age", Value::Int64(40)),
+                        ],
+                    ),
+                ],
+            )),
         );
 
         let plan = LogicalPlan::scan("users", "u")
@@ -155,11 +158,14 @@ mod tests {
         let mut catalog = Catalog::new();
         catalog.insert(
             "users".into(),
-            vec![
-                qrow("u", &[("x", Value::Int64(1))]),
-                qrow("u", &[("x", Value::Int64(2))]),
-                qrow("u", &[("x", Value::Int64(3))]),
-            ],
+            Arc::new(InMemoryTable::new(
+                "users".into(),
+                vec![
+                    qrow("u", &[("x", Value::Int64(1))]),
+                    qrow("u", &[("x", Value::Int64(2))]),
+                    qrow("u", &[("x", Value::Int64(3))]),
+                ],
+            )),
         );
 
         let plan = LogicalPlan::scan("users", "u")

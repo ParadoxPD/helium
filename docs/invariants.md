@@ -55,6 +55,21 @@ Violating these invariants is considered a bug.
 
 ---
 
+## Execution Invariants
+
+- ScanExec outputs base-qualified columns
+- AliasExec outputs alias-qualified columns
+- ProjectExec outputs unqualified columns
+
+---
+
+## Storage Invariants
+
+- Storage is alias-agnostic
+- Storage never sees SQL-level aliases
+
+---
+
 These invariants are enforced through:
 
 - Assertions

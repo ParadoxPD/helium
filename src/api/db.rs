@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::exec::operator::Row;
 use crate::exec::{Catalog, lower};
@@ -6,9 +7,11 @@ use crate::frontend::sql::lower::Lowered;
 use crate::frontend::sql::{lower as sql_lower, parser};
 use crate::ir::pretty::pretty;
 use crate::optimizer::optimize;
+use crate::storage::in_memory::InMemoryTable;
+use crate::storage::table::Table;
 
 pub struct Database {
-    catalog: Catalog,
+    catalog: HashMap<String, Arc<dyn Table>>,
 }
 
 #[derive(Debug)]
@@ -25,7 +28,10 @@ impl Database {
     }
 
     pub fn insert_table(&mut self, name: &str, rows: Vec<Row>) {
-        self.catalog.insert(name.to_string(), rows);
+        self.catalog.insert(
+            name.to_string(),
+            Arc::new(InMemoryTable::new(name.into(), rows)),
+        );
     }
 
     pub fn query(&self, sql: &str) -> QueryResult {
@@ -93,19 +99,19 @@ mod tests {
             "users",
             vec![
                 row(&[
-                    ("t.name", Value::String("Alice".into())),
-                    ("t.age", Value::Int64(30)),
-                    ("t.score", Value::Int64(80)),
+                    ("name", Value::String("Alice".into())),
+                    ("age", Value::Int64(30)),
+                    ("score", Value::Int64(80)),
                 ]),
                 row(&[
-                    ("t.name", Value::String("Bob".into())),
-                    ("t.age", Value::Int64(15)),
-                    ("t.score", Value::Int64(90)),
+                    ("name", Value::String("Bob".into())),
+                    ("age", Value::Int64(15)),
+                    ("score", Value::Int64(90)),
                 ]),
                 row(&[
-                    ("t.name", Value::String("Carol".into())),
-                    ("t.age", Value::Int64(40)),
-                    ("t.score", Value::Int64(40)),
+                    ("name", Value::String("Carol".into())),
+                    ("age", Value::Int64(40)),
+                    ("score", Value::Int64(40)),
                 ]),
             ],
         );
@@ -127,12 +133,12 @@ mod tests {
             "users",
             vec![
                 row(&[
-                    ("t.name", Value::String("Bob".into())),
-                    ("t.age", Value::Int64(30)),
+                    ("name", Value::String("Bob".into())),
+                    ("age", Value::Int64(30)),
                 ]),
                 row(&[
-                    ("t.name", Value::String("Alice".into())),
-                    ("t.age", Value::Int64(20)),
+                    ("name", Value::String("Alice".into())),
+                    ("age", Value::Int64(20)),
                 ]),
             ],
         );
@@ -153,21 +159,22 @@ mod tests {
         db.insert_table(
             "users",
             vec![row(&[
-                ("u.id", Value::Int64(1)),
-                ("u.name", Value::String("Alice".into())),
+                ("id", Value::Int64(1)),
+                ("name", Value::String("Alice".into())),
             ])],
         );
 
         db.insert_table(
             "orders",
             vec![row(&[
-                ("o.user_id", Value::Int64(1)),
-                ("o.amount", Value::Int64(200)),
+                ("user_id", Value::Int64(1)),
+                ("amount", Value::Int64(200)),
             ])],
         );
 
         match db.query("SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id;") {
             QueryResult::Rows(rows) => {
+                println!("ROWS : {:?}", rows);
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].get("name"), Some(&Value::String("Alice".into())));
             }

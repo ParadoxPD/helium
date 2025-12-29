@@ -69,11 +69,14 @@ fn compare_rows(a: &Row, b: &Row, keys: &[(Expr, bool)]) -> std::cmp::Ordering {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::common::value::Value;
     use crate::exec::scan::ScanExec;
     use crate::exec::test_util::qrow;
     use crate::ir::expr::Expr;
+    use crate::storage::in_memory::InMemoryTable;
 
     #[test]
     fn sort_orders_rows() {
@@ -82,7 +85,7 @@ mod tests {
             qrow("t", &[("age", Value::Int64(10))]),
         ];
 
-        let scan = ScanExec::new(data);
+        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
         let mut sort = SortExec::new(Box::new(scan), vec![(Expr::bound_col("t", "age"), true)]);
 
         sort.open();

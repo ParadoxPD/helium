@@ -43,11 +43,14 @@ impl Operator for LimitExec {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::common::value::Value;
     use crate::exec::operator::Operator;
     use crate::exec::scan::ScanExec;
     use crate::exec::test_util::qrow;
+    use crate::storage::in_memory::InMemoryTable;
 
     #[test]
     fn limit_returns_only_n_rows() {
@@ -57,7 +60,7 @@ mod tests {
             qrow("t", &[("x", Value::Int64(3))]),
         ];
 
-        let scan = ScanExec::new(data);
+        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
         let mut limit = LimitExec::new(Box::new(scan), 2);
 
         limit.open();
@@ -71,7 +74,7 @@ mod tests {
     fn limit_zero_returns_no_rows() {
         let data = vec![qrow("t", &[("x", Value::Int64(1))])];
 
-        let scan = ScanExec::new(data);
+        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
         let mut limit = LimitExec::new(Box::new(scan), 0);
 
         limit.open();
@@ -85,7 +88,7 @@ mod tests {
             qrow("t", &[("x", Value::Int64(2))]),
         ];
 
-        let scan = ScanExec::new(data);
+        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
         let mut limit = LimitExec::new(Box::new(scan), 1);
 
         limit.open();
@@ -103,7 +106,7 @@ mod tests {
             qrow("t", &[("x", Value::Int64(2))]),
         ];
 
-        let scan = ScanExec::new(data);
+        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
         let mut limit = LimitExec::new(Box::new(scan), 1);
 
         limit.open();

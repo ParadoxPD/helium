@@ -1,42 +1,47 @@
 use std::sync::Arc;
 
 use crate::exec::operator::{Operator, Row};
+use crate::storage::page::StorageRow;
 use crate::storage::table::{Table, TableCursor};
 
-pub struct ScanExec {
-    table: Arc<dyn Table>,
-    cursor: Option<Box<dyn TableCursor>>,
+pub struct ScanExec<'a> {
+    table: Arc<dyn Table + 'a>,
+    cursor: Option<Box<dyn TableCursor + 'a>>,
+    alias: String,
+    schema: Vec<String>,
 }
 
-impl ScanExec {
-    pub fn new(table: Arc<dyn Table>) -> Self {
+impl<'a> ScanExec<'a> {
+    pub fn new(table: Arc<dyn Table + 'a>, alias: String, schema: Vec<String>) -> Self {
         Self {
             table,
             cursor: None,
+            alias,
+            schema,
         }
     }
 }
 
-impl Operator for ScanExec {
+impl<'a> Operator for ScanExec<'a> {
     fn open(&mut self) {
-        self.cursor = Some(self.table.scan());
+        self.cursor = Some(self.table.clone().scan());
     }
 
     fn next(&mut self) -> Option<Row> {
-        let row = self.cursor.as_mut()?.next();
+        let storage_row = self.cursor.as_mut()?.next()?;
 
-        if let Some(ref r) = row {
-            eprintln!("[ScanExec] row = {:?}", r);
-        } else {
-            eprintln!("[ScanExec] EOF");
+        let mut out = Row::new();
+        for (i, value) in storage_row.values.into_iter().enumerate() {
+            let col = &self.schema[i];
+            out.insert(format!("{}.{}", self.alias, col), value);
         }
 
         debug_assert!(
-            row.clone()?.keys().all(|k| k.contains('.')),
-            "ScanExec must output base-qualified columns"
+            out.keys().all(|k| k.matches('.').count() == 1),
+            "ScanExec must emit exactly one qualification level"
         );
 
-        Some(row.unwrap())
+        Some(out)
     }
 
     fn close(&mut self) {
@@ -46,29 +51,61 @@ impl Operator for ScanExec {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use crate::{
-        common::value::Value, exec::operator::Operator, storage::in_memory::InMemoryTable,
+        common::value::Value,
+        exec::{operator::Operator, scan::ScanExec},
+        storage::{
+            in_memory::InMemoryTable,
+            page::{PageId, RowId, StorageRow},
+            table::Table,
+        },
     };
+
+    fn srow(slot: u16, values: Vec<Value>) -> StorageRow {
+        StorageRow {
+            rid: RowId {
+                page_id: PageId(0),
+                slot_id: slot,
+            },
+            values,
+        }
+    }
 
     #[test]
     fn scan_returns_all_rows() {
-        let data = vec![
-            [("t.id", Value::Int64(1))]
-                .into_iter()
-                .map(|(k, v)| (k.into(), v))
-                .collect(),
-            [("t.id", Value::Int64(2))]
-                .into_iter()
-                .map(|(k, v)| (k.into(), v))
-                .collect(),
+        let schema = vec!["id".into()];
+        let rows = vec![
+            srow(0, vec![Value::Int64(1)]),
+            srow(1, vec![Value::Int64(2)]),
         ];
 
-        let mut scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
+        let table = Arc::new(InMemoryTable::new("t".into(), schema.clone(), rows));
+
+        let mut scan = ScanExec::new(table, "t".into(), schema);
         scan.open();
 
         assert!(scan.next().is_some());
         assert!(scan.next().is_some());
         assert!(scan.next().is_none());
+    }
+
+    #[test]
+    fn table_cursor_emits_distinct_row_ids() {
+        let schema = vec!["id".into()];
+        let rows = vec![
+            srow(0, vec![Value::Int64(1)]),
+            srow(1, vec![Value::Int64(2)]),
+        ];
+
+        let table = Arc::new(InMemoryTable::new("users".into(), schema, rows));
+
+        let mut cursor = table.scan();
+
+        let r1 = cursor.next().unwrap();
+        let r2 = cursor.next().unwrap();
+
+        assert_ne!(r1.rid, r2.rid);
     }
 }

@@ -6,7 +6,7 @@ use helpers::{data::*, harness::TestDB};
 #[test]
 fn select_where_limit() {
     let mut db = TestDB::new();
-    db.register_table("users", users());
+    db.register_table("users", users_schema(), users());
 
     let rows = db.query(
         "
@@ -25,8 +25,8 @@ fn select_where_limit() {
 #[ignore = "AND / OR / parentheses not fully done yet"]
 fn complex_predicates() {
     let mut db = TestDB::new();
-    db.register_table("users", users());
 
+    db.register_table("users", users_schema(), users());
     let rows = db.query(
         "
         SELECT name
@@ -38,4 +38,3 @@ fn complex_predicates() {
 
     assert_eq!(rows.len(), 2);
 }
-

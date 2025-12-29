@@ -48,21 +48,31 @@ mod tests {
     use crate::common::value::Value;
     use crate::exec::operator::Operator;
     use crate::exec::scan::ScanExec;
-    use crate::exec::test_util::qrow;
     use crate::ir::expr::{BinaryOp, Expr};
     use crate::storage::in_memory::InMemoryTable;
+    use crate::storage::page::{PageId, RowId, StorageRow};
+
+    fn srow(slot: u16, values: Vec<Value>) -> StorageRow {
+        StorageRow {
+            rid: RowId {
+                page_id: PageId(0),
+                slot_id: slot,
+            },
+            values,
+        }
+    }
 
     #[test]
     fn project_selects_columns() {
-        let data = vec![qrow(
-            "t",
-            &[
-                ("name", Value::String("Alice".into())),
-                ("age", Value::Int64(30)),
-            ],
+        let schema = vec!["name".into(), "age".into()];
+        let rows = vec![srow(
+            0,
+            vec![Value::String("Alice".into()), Value::Int64(30)],
         )];
 
-        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
+        let table = Arc::new(InMemoryTable::new("t".into(), schema.clone(), rows));
+        let scan = ScanExec::new(table, "t".into(), schema);
+
         let mut project = ProjectExec::new(
             Box::new(scan),
             vec![(
@@ -83,9 +93,11 @@ mod tests {
 
     #[test]
     fn project_computes_expressions() {
-        let data = vec![qrow("t", &[("age", Value::Int64(20))])];
+        let schema = vec!["age".into()];
+        let rows = vec![srow(0, vec![Value::Int64(20)])];
 
-        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
+        let table = Arc::new(InMemoryTable::new("t".into(), schema.clone(), rows));
+        let scan = ScanExec::new(table, "t".into(), schema);
 
         let expr = Expr::bin(
             Expr::bound_col("t", "age"),
@@ -103,9 +115,11 @@ mod tests {
 
     #[test]
     fn project_handles_missing_column_as_null() {
-        let data = vec![qrow("t", &[("name", Value::String("Bob".into()))])];
+        let schema = vec!["name".into()];
+        let rows = vec![srow(0, vec![Value::String("Bob".into())])];
 
-        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
+        let table = Arc::new(InMemoryTable::new("t".into(), schema.clone(), rows));
+        let scan = ScanExec::new(table, "t".into(), schema);
 
         let mut project = ProjectExec::new(
             Box::new(scan),
@@ -120,12 +134,14 @@ mod tests {
 
     #[test]
     fn project_preserves_row_count() {
-        let data = vec![
-            qrow("t", &[("x", Value::Int64(1))]),
-            qrow("t", &[("x", Value::Int64(2))]),
+        let schema = vec!["x".into()];
+        let rows = vec![
+            srow(0, vec![Value::Int64(1)]),
+            srow(1, vec![Value::Int64(2)]),
         ];
 
-        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
+        let table = Arc::new(InMemoryTable::new("t".into(), schema.clone(), rows));
+        let scan = ScanExec::new(table, "t".into(), schema);
 
         let mut project = ProjectExec::new(
             Box::new(scan),

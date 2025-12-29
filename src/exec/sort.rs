@@ -73,22 +73,38 @@ mod tests {
 
     use super::*;
     use crate::common::value::Value;
+    use crate::exec::operator::Operator;
     use crate::exec::scan::ScanExec;
-    use crate::exec::test_util::qrow;
     use crate::ir::expr::Expr;
     use crate::storage::in_memory::InMemoryTable;
+    use crate::storage::page::{PageId, RowId, StorageRow};
+
+    fn srow(slot: u16, values: Vec<Value>) -> StorageRow {
+        StorageRow {
+            rid: RowId {
+                page_id: PageId(0),
+                slot_id: slot,
+            },
+            values,
+        }
+    }
 
     #[test]
     fn sort_orders_rows() {
-        let data = vec![
-            qrow("t", &[("age", Value::Int64(30))]),
-            qrow("t", &[("age", Value::Int64(10))]),
+        let schema = vec!["age".into()];
+        let rows = vec![
+            srow(0, vec![Value::Int64(30)]),
+            srow(1, vec![Value::Int64(10)]),
         ];
 
-        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
+        let table = Arc::new(InMemoryTable::new("t".into(), schema.clone(), rows));
+
+        let scan = ScanExec::new(table, "t".into(), schema);
         let mut sort = SortExec::new(Box::new(scan), vec![(Expr::bound_col("t", "age"), true)]);
 
         sort.open();
-        assert_eq!(sort.next().unwrap().get("t.age"), Some(&Value::Int64(10)));
+        let first = sort.next().unwrap();
+
+        assert_eq!(first.get("t.age"), Some(&Value::Int64(10)));
     }
 }

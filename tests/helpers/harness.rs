@@ -13,8 +13,8 @@ impl TestDB {
         }
     }
 
-    pub fn register_table(&mut self, name: &str, rows: Vec<Row>) {
-        self.db.insert_table(name, rows);
+    pub fn register_table(&mut self, name: &str, schema: Vec<String>, rows: Vec<Row>) {
+        self.db.insert_table(name, schema, rows);
     }
 
     pub fn query(&self, sql: &str) -> Vec<Row> {
@@ -38,4 +38,3 @@ impl TestDB {
         }
     }
 }
-

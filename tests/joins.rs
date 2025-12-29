@@ -6,8 +6,8 @@ use helpers::{data::*, harness::TestDB};
 #[test]
 fn inner_join_basic() {
     let mut db = TestDB::new();
-    db.register_table("users", users());
-    db.register_table("orders", orders());
+    db.register_table("users", users_schema(), users());
+    db.register_table("orders", orders_schema(), orders());
 
     let rows = db.query(
         "

@@ -1,6 +1,8 @@
+use crate::common::schema::Schema;
 use crate::exec::expr_eval::eval_predicate;
 use crate::exec::operator::{Operator, Row};
 use crate::ir::expr::Expr;
+use crate::storage::page::{RowId, StorageRow};
 
 pub struct JoinExec {
     left: Box<dyn Operator>,
@@ -93,64 +95,88 @@ impl Operator for JoinExec {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use super::*;
+#[test]
+fn join_matches_rows() {
     use crate::common::value::Value;
+    use crate::exec::join::JoinExec;
     use crate::exec::operator::Operator;
     use crate::exec::scan::ScanExec;
-    use crate::exec::test_util::qrow;
     use crate::ir::expr::{BinaryOp, Expr};
     use crate::storage::in_memory::InMemoryTable;
+    use crate::storage::page::PageId;
+    use std::sync::Arc;
 
-    #[test]
-    fn join_matches_rows() {
-        let left_data = vec![
-            qrow(
-                "u",
-                &[
-                    ("id", Value::Int64(1)),
-                    ("name", Value::String("Alice".into())),
-                ],
-            ),
-            qrow(
-                "u",
-                &[
-                    ("id", Value::Int64(2)),
-                    ("name", Value::String("Bob".into())),
-                ],
-            ),
-        ];
+    // ---------- schema ----------
+    let user_schema = vec!["id".into(), "name".into()];
+    let order_schema = vec!["user_id".into(), "amount".into()];
 
-        let right_data = vec![
-            qrow(
-                "o",
-                &[("user_id", Value::Int64(1)), ("amount", Value::Int64(200))],
-            ),
-            qrow(
-                "o",
-                &[("user_id", Value::Int64(3)), ("amount", Value::Int64(50))],
-            ),
-        ];
+    // ---------- left table (users) ----------
+    let users = vec![
+        StorageRow {
+            rid: RowId {
+                page_id: PageId(0),
+                slot_id: 0,
+            },
+            values: vec![Value::Int64(1), Value::String("Alice".into())],
+        },
+        StorageRow {
+            rid: RowId {
+                page_id: PageId(0),
+                slot_id: 1,
+            },
+            values: vec![Value::Int64(2), Value::String("Bob".into())],
+        },
+    ];
 
-        let left = ScanExec::new(Arc::new(InMemoryTable::new("u".into(), left_data)));
-        let right = ScanExec::new(Arc::new(InMemoryTable::new("o".into(), right_data)));
+    let users_table = Arc::new(InMemoryTable::new(
+        "users".into(),
+        user_schema.clone(),
+        users,
+    ));
 
-        let on = Expr::bin(
-            Expr::bound_col("u", "id"),
-            BinaryOp::Eq,
-            Expr::bound_col("o", "user_id"),
-        );
+    // ---------- right table (orders) ----------
+    let orders = vec![
+        StorageRow {
+            rid: RowId {
+                page_id: PageId(0),
+                slot_id: 0,
+            },
+            values: vec![Value::Int64(1), Value::Int64(200)],
+        },
+        StorageRow {
+            rid: RowId {
+                page_id: PageId(0),
+                slot_id: 1,
+            },
+            values: vec![Value::Int64(3), Value::Int64(50)],
+        },
+    ];
 
-        let mut join = JoinExec::new(Box::new(left), Box::new(right), on);
-        join.open();
+    let orders_table = Arc::new(InMemoryTable::new(
+        "orders".into(),
+        order_schema.clone(),
+        orders,
+    ));
 
-        let result = join.next().unwrap();
-        assert_eq!(result.get("u.name"), Some(&Value::String("Alice".into())));
-        assert_eq!(result.get("o.amount"), Some(&Value::Int64(200)));
+    // ---------- scans ----------
+    let left = ScanExec::new(users_table, "u".into(), user_schema);
 
-        assert!(join.next().is_none());
-    }
+    let right = ScanExec::new(orders_table, "o".into(), order_schema);
+
+    // ---------- join condition ----------
+    let on = Expr::bin(
+        Expr::bound_col("u", "id"),
+        BinaryOp::Eq,
+        Expr::bound_col("o", "user_id"),
+    );
+
+    let mut join = JoinExec::new(Box::new(left), Box::new(right), on);
+    join.open();
+
+    let result = join.next().unwrap();
+
+    assert_eq!(result.get("u.name"), Some(&Value::String("Alice".into())));
+    assert_eq!(result.get("o.amount"), Some(&Value::Int64(200)));
+
+    assert!(join.next().is_none());
 }

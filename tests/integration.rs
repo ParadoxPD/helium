@@ -7,8 +7,8 @@ use helpers::{data::*, harness::TestDB};
 #[ignore = "GROUP BY + aggregates not implemented yet"]
 fn full_pipeline_query() {
     let mut db = TestDB::new();
-    db.register_table("users", users());
-    db.register_table("orders", orders());
+    db.register_table("users", users_schema(), users());
+    db.register_table("orders", orders_schema(), orders());
 
     let rows = db.query(
         "
@@ -23,4 +23,3 @@ fn full_pipeline_query() {
 
     assert_eq!(rows[0]["name"], Value::String("Alice".into()));
 }
-

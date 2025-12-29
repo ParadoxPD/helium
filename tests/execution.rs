@@ -6,7 +6,7 @@ use helpers::{data::*, harness::TestDB};
 #[ignore = "needs execution stats"]
 fn limit_short_circuits_execution() {
     let mut db = TestDB::new();
-    db.register_table("users", users());
+    db.register_table("users", users_schema(), users());
 
     let stats = db.explain_analyze(
         "

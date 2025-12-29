@@ -20,6 +20,11 @@ pub fn users() -> Vec<Row> {
 }
 
 #[allow(dead_code)]
+pub fn users_schema() -> Vec<String> {
+    vec!["id".into(), "name".into(), "age".into(), "active".into()]
+}
+
+#[allow(dead_code)]
 pub fn orders() -> Vec<Row> {
     vec![
         row(&[
@@ -33,6 +38,11 @@ pub fn orders() -> Vec<Row> {
             ("amount", Value::Int64(20)),
         ]),
     ]
+}
+
+#[allow(dead_code)]
+pub fn orders_schema() -> Vec<String> {
+    vec!["id".into(), "user_id".into(), "amount".into()]
 }
 
 fn row(kvs: &[(&str, Value)]) -> Row {

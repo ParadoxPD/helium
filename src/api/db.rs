@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::common::schema::Schema;
+use crate::common::value::Value;
 use crate::exec::operator::Row;
 use crate::exec::{Catalog, lower};
 use crate::frontend::sql::lower::Lowered;
@@ -8,6 +10,7 @@ use crate::frontend::sql::{lower as sql_lower, parser};
 use crate::ir::pretty::pretty;
 use crate::optimizer::optimize;
 use crate::storage::in_memory::InMemoryTable;
+use crate::storage::page::{PageId, RowId, StorageRow};
 use crate::storage::table::Table;
 
 pub struct Database {
@@ -27,10 +30,37 @@ impl Database {
         }
     }
 
-    pub fn insert_table(&mut self, name: &str, rows: Vec<Row>) {
+    pub fn insert_table(&mut self, table: &str, schema: Schema, rows: Vec<Row>) {
+        let storage_rows = rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let mut values = Vec::with_capacity(schema.len());
+
+                for col in schema.clone() {
+                    // Accept both qualified and unqualified input
+                    let v = row
+                        .get(&format!("{table}.{col}"))
+                        .or_else(|| row.get(&col))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+
+                    values.push(v);
+                }
+
+                StorageRow {
+                    rid: RowId {
+                        page_id: PageId(0),
+                        slot_id: i as u16,
+                    },
+                    values,
+                }
+            })
+            .collect();
+
         self.catalog.insert(
-            name.to_string(),
-            Arc::new(InMemoryTable::new(name.into(), rows)),
+            table.to_string(),
+            Arc::new(InMemoryTable::new(table.to_string(), schema, storage_rows)),
         );
     }
 
@@ -95,8 +125,11 @@ mod tests {
     fn sql_query_with_and_and_limit() {
         let mut db = Database::new();
 
+        let schema = vec!["name".into(), "age".into(), "score".into()];
+
         db.insert_table(
             "users",
+            schema,
             vec![
                 row(&[
                     ("name", Value::String("Alice".into())),
@@ -129,8 +162,11 @@ mod tests {
     fn sql_order_by_works() {
         let mut db = Database::new();
 
+        let schema = vec!["name".into(), "age".into()];
+
         db.insert_table(
             "users",
+            schema,
             vec![
                 row(&[
                     ("name", Value::String("Bob".into())),
@@ -145,7 +181,6 @@ mod tests {
 
         match db.query("SELECT name FROM users ORDER BY age ASC;") {
             QueryResult::Rows(rows) => {
-                println!("ROWS = {:#?}", rows);
                 assert_eq!(rows[0].get("name"), Some(&Value::String("Alice".into())));
             }
             _ => panic!("expected rows"),
@@ -156,8 +191,13 @@ mod tests {
     fn sql_join_works() {
         let mut db = Database::new();
 
+        let users_schema = vec!["id".into(), "name".into()];
+
+        let orders_schema = vec!["user_id".into(), "amount".into()];
+
         db.insert_table(
             "users",
+            users_schema,
             vec![row(&[
                 ("id", Value::Int64(1)),
                 ("name", Value::String("Alice".into())),
@@ -166,6 +206,7 @@ mod tests {
 
         db.insert_table(
             "orders",
+            orders_schema,
             vec![row(&[
                 ("user_id", Value::Int64(1)),
                 ("amount", Value::Int64(200)),
@@ -174,7 +215,6 @@ mod tests {
 
         match db.query("SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id;") {
             QueryResult::Rows(rows) => {
-                println!("ROWS : {:?}", rows);
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].get("name"), Some(&Value::String("Alice".into())));
             }

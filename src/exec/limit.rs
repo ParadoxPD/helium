@@ -1,4 +1,7 @@
-use crate::exec::operator::{Operator, Row};
+use crate::{
+    exec::operator::{Operator, Row},
+    storage::page::StorageRow,
+};
 
 pub struct LimitExec {
     input: Box<dyn Operator>,
@@ -45,22 +48,36 @@ impl Operator for LimitExec {
 mod tests {
     use std::sync::Arc;
 
-    use super::*;
     use crate::common::value::Value;
+    use crate::exec::limit::LimitExec;
     use crate::exec::operator::Operator;
     use crate::exec::scan::ScanExec;
-    use crate::exec::test_util::qrow;
     use crate::storage::in_memory::InMemoryTable;
+    use crate::storage::page::{PageId, RowId, StorageRow};
+
+    fn rows(vals: &[i64]) -> Vec<StorageRow> {
+        vals.iter()
+            .enumerate()
+            .map(|(i, v)| StorageRow {
+                rid: RowId {
+                    page_id: PageId(0),
+                    slot_id: i as u16,
+                },
+                values: vec![Value::Int64(*v)],
+            })
+            .collect()
+    }
 
     #[test]
     fn limit_returns_only_n_rows() {
-        let data = vec![
-            qrow("t", &[("x", Value::Int64(1))]),
-            qrow("t", &[("x", Value::Int64(2))]),
-            qrow("t", &[("x", Value::Int64(3))]),
-        ];
+        let schema = vec!["x".into()];
+        let table = Arc::new(InMemoryTable::new(
+            "t".into(),
+            schema.clone(),
+            rows(&[1, 2, 3]),
+        ));
 
-        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
+        let scan = ScanExec::new(table, "t".into(), schema);
         let mut limit = LimitExec::new(Box::new(scan), 2);
 
         limit.open();
@@ -72,9 +89,10 @@ mod tests {
 
     #[test]
     fn limit_zero_returns_no_rows() {
-        let data = vec![qrow("t", &[("x", Value::Int64(1))])];
+        let schema = vec!["x".into()];
+        let table = Arc::new(InMemoryTable::new("t".into(), schema.clone(), rows(&[1])));
 
-        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
+        let scan = ScanExec::new(table, "t".into(), schema);
         let mut limit = LimitExec::new(Box::new(scan), 0);
 
         limit.open();
@@ -83,30 +101,33 @@ mod tests {
 
     #[test]
     fn limit_does_not_consume_extra_rows() {
-        let data = vec![
-            qrow("t", &[("x", Value::Int64(1))]),
-            qrow("t", &[("x", Value::Int64(2))]),
-        ];
+        let schema = vec!["x".into()];
+        let table = Arc::new(InMemoryTable::new(
+            "t".into(),
+            schema.clone(),
+            rows(&[1, 2]),
+        ));
 
-        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
+        let scan = ScanExec::new(table, "t".into(), schema);
         let mut limit = LimitExec::new(Box::new(scan), 1);
 
         limit.open();
         let first = limit.next().unwrap();
         assert_eq!(first.get("t.x"), Some(&Value::Int64(1)));
 
-        // Should not pull the second row
         assert!(limit.next().is_none());
     }
 
     #[test]
     fn limit_resets_on_open() {
-        let data = vec![
-            qrow("t", &[("x", Value::Int64(1))]),
-            qrow("t", &[("x", Value::Int64(2))]),
-        ];
+        let schema = vec!["x".into()];
+        let table = Arc::new(InMemoryTable::new(
+            "t".into(),
+            schema.clone(),
+            rows(&[1, 2]),
+        ));
 
-        let scan = ScanExec::new(Arc::new(InMemoryTable::new("t".into(), data)));
+        let scan = ScanExec::new(table, "t".into(), schema);
         let mut limit = LimitExec::new(Box::new(scan), 1);
 
         limit.open();

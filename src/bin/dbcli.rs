@@ -9,6 +9,7 @@ fn main() {
 
     db.insert_table(
         "users",
+        vec!["name".into(), "age".into(), "score".into()],
         vec![
             row(&[
                 ("name", Value::String("Alice".into())),

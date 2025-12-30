@@ -14,6 +14,7 @@ pub fn predicate_pushdown(plan: &LogicalPlan) -> LogicalPlan {
 
         LogicalPlan::Limit(limit) => LogicalPlan::Limit(limit.clone()),
         LogicalPlan::Scan(_) => plan.clone(),
+        LogicalPlan::IndexScan(_) => plan.clone(),
         LogicalPlan::Join(join) => LogicalPlan::Join(Join {
             left: Box::new(predicate_pushdown(&join.left)),
             right: Box::new(predicate_pushdown(&join.right)),

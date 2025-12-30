@@ -36,6 +36,11 @@ Violating these invariants is considered a bug.
 - Only `Expr::BoundColumn` is allowed at runtime
 - Execution operators must not mutate input rows
 - LIMIT must short-circuit upstream operators
+- ScanExec must always emit the full base table schema.
+- Projection is never allowed to affect storage-level execution.
+- ScanExec outputs base-qualified columns
+- AliasExec outputs alias-qualified columns
+- ProjectExec outputs unqualified columns
 
 ---
 
@@ -55,18 +60,15 @@ Violating these invariants is considered a bug.
 
 ---
 
-## Execution Invariants
-
-- ScanExec outputs base-qualified columns
-- AliasExec outputs alias-qualified columns
-- ProjectExec outputs unqualified columns
-
----
-
 ## Storage Invariants
 
 - Storage is alias-agnostic
 - Storage never sees SQL-level aliases
+- Index stores ONLY RowId
+- Index NEVER touches Row or StorageRow
+- Index keys are value-only (IndexKey)
+- ScanExec and IndexScanExec are separate
+- Storage is source of truth
 
 ---
 

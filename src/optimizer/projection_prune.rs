@@ -32,6 +32,7 @@ fn collect_required_columns(plan: &LogicalPlan, required: &mut HashSet<String>) 
             collect_required_columns(&limit.input, required);
         }
         LogicalPlan::Scan(_) => {}
+        LogicalPlan::IndexScan(_) => {}
         LogicalPlan::Join(join) => {
             collect_required_columns(&join.left, required);
             collect_required_columns(&join.right, required);
@@ -142,6 +143,7 @@ fn rewrite(plan: &LogicalPlan, required: &mut HashSet<String>) -> LogicalPlan {
             scan.columns = required.iter().cloned().collect();
             LogicalPlan::Scan(scan)
         }
+        LogicalPlan::IndexScan(_) => plan.clone(),
 
         LogicalPlan::Sort(sort) => LogicalPlan::Sort(crate::ir::plan::Sort {
             input: Box::new(rewrite(&sort.input, required)),

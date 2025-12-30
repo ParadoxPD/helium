@@ -5,6 +5,7 @@ use crate::ir::plan::{Filter, Join, LogicalPlan, Project};
 pub fn constant_fold(plan: &LogicalPlan) -> LogicalPlan {
     match plan {
         LogicalPlan::Scan(_) => plan.clone(),
+        LogicalPlan::IndexScan(_) => plan.clone(),
         LogicalPlan::Filter(filter) => LogicalPlan::Filter(Filter {
             input: Box::new(constant_fold(&filter.input)),
             predicate: fold_expr(&filter.predicate),

@@ -19,6 +19,7 @@ pub fn validate(plan: &LogicalPlan) -> ValidationResult {
 fn validate_node(plan: &LogicalPlan) -> ValidationResult {
     match plan {
         LogicalPlan::Scan(scan) => validate_scan(scan),
+        LogicalPlan::IndexScan(_) => Ok(()),
         LogicalPlan::Sort(sort) => validate_sort(sort),
         LogicalPlan::Filter(filter) => validate_filter(filter),
         LogicalPlan::Project(project) => validate_project(project),

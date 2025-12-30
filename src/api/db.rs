@@ -70,7 +70,7 @@ impl Database {
 
         match lowered {
             Lowered::Plan(plan) => {
-                let plan = optimize(&plan);
+                let plan = optimize(&plan, &self.catalog);
                 let mut exec = lower(&plan, &self.catalog);
                 exec.open();
 
@@ -82,7 +82,7 @@ impl Database {
             }
 
             Lowered::Explain { analyze, plan } => {
-                let plan = optimize(&plan);
+                let plan = optimize(&plan, &self.catalog);
 
                 if !analyze {
                     return QueryResult::Explain(pretty(&plan));

@@ -1,5 +1,6 @@
 pub mod expr_eval;
 pub mod filter;
+pub mod index_scan;
 pub mod join;
 pub mod limit;
 pub mod operator;
@@ -11,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::exec::filter::FilterExec;
+use crate::exec::index_scan::IndexScanExec;
 use crate::exec::join::JoinExec;
 use crate::exec::limit::LimitExec;
 use crate::exec::operator::{Operator, Row};
@@ -54,6 +56,16 @@ pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
             let right = lower(&join.right, catalog);
 
             Box::new(JoinExec::new(left, right, join.on.clone()))
+        }
+        LogicalPlan::IndexScan(i) => {
+            let table = catalog.get(&i.table).unwrap();
+            Box::new(IndexScanExec::new(
+                table.clone(),
+                i.column.clone(),
+                i.value.clone(),
+                i.alias.clone(),
+                table.schema().clone(),
+            ))
         }
     }
 }

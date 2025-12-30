@@ -25,6 +25,18 @@ pub struct StorageRow {
     pub values: Vec<Value>,
 }
 
+impl StorageRow {
+    pub fn new(values: Vec<Value>) -> Self {
+        Self {
+            rid: RowId {
+                page_id: PageId(0),
+                slot_id: 0,
+            },
+            values: values,
+        }
+    }
+}
+
 pub struct RowSlot {
     pub row: Option<StorageRow>,
     pub used: bool,
@@ -53,19 +65,52 @@ impl RowPage {
             capacity,
         }
     }
-
-    pub fn insert(&mut self, row: StorageRow) -> Option<RowId> {
-        for (i, slot) in self.slots.iter_mut().enumerate() {
-            if !slot.used || slot.row.is_none() {
-                slot.row = Some(row);
-                slot.used = true;
-                return Some(RowId {
-                    page_id: self.id,
-                    slot_id: i as u16,
-                });
-            }
+    pub fn insert(&mut self, values: Vec<Value>) -> Option<RowId> {
+        if self.is_full() {
+            return None;
         }
-        None
+
+        let slot_id = self.slots.len() as u16;
+        let rid = RowId {
+            page_id: self.id,
+            slot_id,
+        };
+
+        self.slots.push(RowSlot {
+            used: true,
+            row: Some(StorageRow { rid, values }),
+        });
+
+        Some(rid)
+    }
+
+    pub fn delete(&mut self, slot_id: u16) -> bool {
+        let slot = match self.slots.get_mut(slot_id as usize) {
+            Some(s) => s,
+            None => return false,
+        };
+
+        if !slot.used {
+            return false;
+        }
+
+        slot.used = false;
+        slot.row = None;
+        true
+    }
+    pub fn update(&mut self, slot_id: u16, values: Vec<Value>) -> bool {
+        let slot = match self.slots.get_mut(slot_id as usize) {
+            Some(s) => s,
+            None => return false,
+        };
+
+        if !slot.used {
+            return false;
+        }
+
+        let rid = slot.row.as_ref().unwrap().rid;
+        slot.row = Some(StorageRow { rid, values });
+        true
     }
 
     pub fn get(&self, slot_id: u16) -> Option<&StorageRow> {
@@ -86,27 +131,6 @@ impl RowPage {
                 )
             })
         })
-    }
-
-    pub fn delete(&mut self, slot_id: u16) -> bool {
-        if let Some(slot) = self.slots.get_mut(slot_id as usize) {
-            if slot.row.is_some() {
-                slot.row = None; // tombstone
-                slot.used = true;
-                return true;
-            }
-        }
-        false
-    }
-
-    pub fn update(&mut self, slot_id: u16, new_row: StorageRow) -> bool {
-        if let Some(slot) = self.slots.get_mut(slot_id as usize) {
-            if slot.used && slot.row.is_some() {
-                slot.row = Some(new_row);
-                return true;
-            }
-        }
-        false
     }
 
     pub fn push(&mut self, row: StorageRow) -> Result<RowId, ()> {

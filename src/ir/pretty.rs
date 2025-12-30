@@ -28,6 +28,7 @@ fn fmt_plan(plan: &LogicalPlan, prefix: &str, is_last: bool, is_root: bool, out:
 
     match plan {
         LogicalPlan::Scan(_) => {}
+        LogicalPlan::IndexScan(_) => {}
         LogicalPlan::Filter(Filter { input, .. }) => {
             fmt_plan(input, &child_prefix, true, false, out);
         }
@@ -52,6 +53,10 @@ fn node_label(plan: &LogicalPlan) -> String {
         LogicalPlan::Scan(Scan { table, .. }) => {
             format!("Scan {table}")
         }
+        LogicalPlan::IndexScan(i) => {
+            format!("IndexScan(table={}, column={})", i.table, i.column)
+        }
+
         LogicalPlan::Filter(Filter { predicate, .. }) => {
             format!("Filter ({predicate})")
         }

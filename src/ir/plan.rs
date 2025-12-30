@@ -1,4 +1,4 @@
-use crate::ir::expr::Expr;
+use crate::{common::value::Value, ir::expr::Expr};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LogicalPlan {
@@ -8,6 +8,7 @@ pub enum LogicalPlan {
     Sort(Sort),
     Limit(Limit),
     Join(Join),
+    IndexScan(IndexScan),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -46,6 +47,14 @@ pub struct Join {
     pub left: Box<LogicalPlan>,
     pub right: Box<LogicalPlan>,
     pub on: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndexScan {
+    pub table: String,
+    pub alias: String,
+    pub column: String,
+    pub value: Value,
 }
 
 impl Limit {
@@ -97,6 +106,7 @@ impl LogicalPlan {
     pub fn arity(&self) -> usize {
         match self {
             LogicalPlan::Scan(_) => 0,
+            LogicalPlan::IndexScan(_) => 0,
             LogicalPlan::Filter(_) => 1,
             LogicalPlan::Project(_) => 1,
             LogicalPlan::Sort(_) => 1,
@@ -113,6 +123,7 @@ impl LogicalPlan {
             LogicalPlan::Sort(s) => Some(&s.input),
             LogicalPlan::Join(_) => None,
             LogicalPlan::Scan(_) => None,
+            LogicalPlan::IndexScan(_) => None,
         }
     }
 }

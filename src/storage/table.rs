@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
     common::schema::Schema,
     exec::operator::Row,
-    storage::page::{Page, PageId, RowId, RowPage, StorageRow},
+    storage::page::{Page, PageId, RowId, RowPage, RowSlot, StorageRow},
 };
 
 pub trait Table: Send + Sync {
@@ -65,8 +65,8 @@ impl HeapTable {
 
     pub fn delete(&mut self, rid: RowId) -> bool {
         let page = &mut self.pages[rid.page_id.0 as usize];
-        if let Some(slot) = page.slots.get_mut(rid.slot_id as usize) {
-            *slot = None.unwrap();
+        if let Some(_slot) = page.slots.get_mut(rid.slot_id as usize) {
+            page.slots.remove(rid.slot_id as usize);
             return true;
         }
         false

@@ -12,27 +12,30 @@ pub struct ScanExec<'a> {
 }
 
 impl<'a> ScanExec<'a> {
-    pub fn new(table: Arc<dyn Table + 'a>, alias: String, schema: Vec<String>) -> Self {
+    pub fn new(table: Arc<dyn Table + 'a>, alias: String, _schema: Vec<String>) -> Self {
         Self {
             table,
             cursor: None,
             alias,
-            schema,
+            schema: Vec::new(),
         }
     }
 }
 
 impl<'a> Operator for ScanExec<'a> {
     fn open(&mut self) {
+        self.schema = self.table.schema().to_vec();
         self.cursor = Some(self.table.clone().scan());
     }
 
     fn next(&mut self) -> Option<Row> {
         let storage_row = self.cursor.as_mut()?.next()?;
 
+        let schema = self.table.schema();
+        println!("SCHEMA  = {:?}", self.schema);
+
         let mut out = Row::new();
-        for (i, value) in storage_row.values.into_iter().enumerate() {
-            let col = &self.schema[i];
+        for (col, value) in schema.iter().zip(storage_row.values.into_iter()) {
             out.insert(format!("{}.{}", self.alias, col), value);
         }
 

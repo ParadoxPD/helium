@@ -133,7 +133,7 @@ impl Page for RowPage {
     }
 
     fn capacity(&self) -> usize {
-        self.slots.len()
+        self.capacity
     }
 
     fn num_rows(&self) -> usize {

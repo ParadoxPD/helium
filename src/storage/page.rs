@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use crate::{common::value::Value, exec::operator::Row};
+use crate::{
+    buffer::frame::PAGE_SIZE, common::value::Value, exec::operator::Row,
+    storage::page_manager::PageManager,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PageId(pub u64);
@@ -51,103 +54,280 @@ impl RowSlot {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Slot {
+    pub offset: u32, // index into rows vector (or byte offset later)
+    pub used: bool,
+}
+
+const HEADER_SIZE: usize = 8;
+const SLOT_SIZE: usize = 4;
+
 pub struct RowPage {
     pub id: PageId,
-    pub slots: Vec<RowSlot>,
+    pub(crate) slots: Vec<Slot>,
+    rows: Vec<StorageRow>,
+    free_slots: Vec<u16>,
     capacity: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RowPageData {
+    pub id: PageId,
+    pub slots: Vec<Slot>,
+    pub rows: Vec<StorageRow>,
+    pub capacity: usize,
+}
+
+pub struct HeapPageHandle<'a> {
+    page_id: PageId,
+    pm: &'a mut dyn PageManager,
+}
+
+impl RowPage {
+    pub fn to_data(&self) -> RowPageData {
+        RowPageData {
+            id: self.id,
+            slots: self.slots.clone(),
+            rows: self.rows.clone(),
+            capacity: self.capacity,
+        }
+    }
+
+    pub fn from_data(data: RowPageData) -> Self {
+        let free_slots = data
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| if !s.used { Some(i as u16) } else { None })
+            .collect();
+
+        Self {
+            id: data.id,
+            slots: data.slots,
+            rows: data.rows,
+            free_slots,
+            capacity: data.capacity,
+        }
+    }
 }
 
 impl RowPage {
     pub fn new(id: PageId, capacity: usize) -> Self {
         Self {
             id,
-            slots: (0..capacity).map(|_| RowSlot::empty()).collect(),
+            slots: Vec::with_capacity(capacity),
+            rows: Vec::with_capacity(capacity),
+            free_slots: Vec::new(),
             capacity,
         }
     }
+
     pub fn insert(&mut self, values: Vec<Value>) -> Option<RowId> {
-        if self.is_full() {
+        if self.num_rows() == self.capacity {
             return None;
         }
 
-        let slot_id = self.slots.len() as u16;
-        let rid = RowId {
-            page_id: self.id,
-            slot_id,
+        let row = StorageRow {
+            rid: RowId {
+                page_id: self.id,
+                slot_id: 0, // filled below
+            },
+            values,
         };
 
-        self.slots.push(RowSlot {
-            used: true,
-            row: Some(StorageRow { rid, values }),
-        });
+        let slot_id = if let Some(free) = self.free_slots.pop() {
+            let slot = &mut self.slots[free as usize];
+            slot.used = true;
+            slot.offset = self.rows.len() as u32;
+            free
+        } else {
+            let slot_id = self.slots.len() as u16;
+            self.slots.push(Slot {
+                offset: self.rows.len() as u32,
+                used: true,
+            });
+            slot_id
+        };
 
-        Some(rid)
+        let mut row = row;
+        row.rid.slot_id = slot_id;
+        self.rows.push(row);
+        self.assert_consistent();
+
+        Some(RowId {
+            page_id: self.id,
+            slot_id,
+        })
     }
 
     pub fn delete(&mut self, slot_id: u16) -> bool {
         let slot = match self.slots.get_mut(slot_id as usize) {
-            Some(s) => s,
-            None => return false,
+            Some(s) if s.used => s,
+            _ => return false,
         };
-
-        if !slot.used {
-            return false;
-        }
 
         slot.used = false;
-        slot.row = None;
-        true
-    }
-    pub fn update(&mut self, slot_id: u16, values: Vec<Value>) -> bool {
-        let slot = match self.slots.get_mut(slot_id as usize) {
-            Some(s) => s,
-            None => return false,
-        };
-
-        if !slot.used {
-            return false;
-        }
-
-        let rid = slot.row.as_ref().unwrap().rid;
-        slot.row = Some(StorageRow { rid, values });
+        self.free_slots.push(slot_id);
+        self.assert_consistent();
         true
     }
 
     pub fn get(&self, slot_id: u16) -> Option<&StorageRow> {
-        self.slots
-            .get(slot_id as usize)
-            .and_then(|s| s.row.as_ref())
+        let slot = self.slots.get(slot_id as usize)?;
+        if !slot.used {
+            return None;
+        }
+        self.rows.get(slot.offset as usize)
+    }
+
+    pub fn update(&mut self, slot_id: u16, values: Vec<Value>) -> bool {
+        let slot = match self.slots.get(slot_id as usize) {
+            Some(s) if s.used => s,
+            _ => return false,
+        };
+
+        let row = match self.rows.get_mut(slot.offset as usize) {
+            Some(r) => r,
+            None => return false,
+        };
+
+        row.values = values;
+        self.assert_consistent();
+        true
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (RowId, &StorageRow)> {
-        self.slots.iter().enumerate().filter_map(move |(i, slot)| {
-            slot.row.as_ref().map(|row| {
-                (
-                    RowId {
-                        page_id: self.id,
-                        slot_id: i as u16,
-                    },
-                    row,
-                )
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(move |(slot_id, slot)| {
+                if slot.used {
+                    let row = &self.rows[slot.offset as usize];
+                    Some((
+                        RowId {
+                            page_id: self.id,
+                            slot_id: slot_id as u16,
+                        },
+                        row,
+                    ))
+                } else {
+                    None
+                }
             })
-        })
     }
 
-    pub fn push(&mut self, row: StorageRow) -> Result<RowId, ()> {
-        if self.is_full() {
-            return Err(());
+    pub fn num_rows(&self) -> usize {
+        self.slots.iter().filter(|s| s.used).count()
+    }
+}
+
+impl RowPage {
+    pub fn write_bytes(&self, buf: &mut [u8]) {
+        assert!(buf.len() >= PAGE_SIZE);
+
+        // zero page
+        buf.fill(0);
+
+        let slot_count = self.slots.len() as u16;
+        let row_count = self.rows.len() as u16;
+        let capacity = self.capacity as u16;
+
+        // ---- header ----
+        buf[0..2].copy_from_slice(&slot_count.to_le_bytes());
+        buf[2..4].copy_from_slice(&row_count.to_le_bytes());
+        buf[4..6].copy_from_slice(&capacity.to_le_bytes());
+        // buf[6..8] reserved
+
+        // ---- slots ----
+        let mut offset = HEADER_SIZE;
+        for slot in &self.slots {
+            let off = slot.offset as u16;
+            buf[offset..offset + 2].copy_from_slice(&off.to_le_bytes());
+            buf[offset + 2] = if slot.used { 1 } else { 0 };
+            offset += SLOT_SIZE;
         }
 
-        let idx = self.slots.len();
-        self.slots.push(RowSlot {
-            row: Some(row),
-            used: true,
-        });
+        // ---- rows ----
+        let mut row_ptr = HEADER_SIZE + SLOT_SIZE * self.slots.len();
+        for row in &self.rows {
+            let values = &row.values;
 
-        Ok(RowId {
-            page_id: self.id,
-            slot_id: idx as u16,
-        })
+            buf[row_ptr..row_ptr + 2].copy_from_slice(&(values.len() as u16).to_le_bytes());
+            row_ptr += 2;
+
+            for v in values {
+                let mut tmp = Vec::new();
+                v.serialize(&mut tmp);
+                buf[row_ptr..row_ptr + tmp.len()].copy_from_slice(&tmp);
+                row_ptr += tmp.len();
+            }
+        }
+    }
+}
+
+impl RowPage {
+    pub fn from_bytes(id: PageId, buf: &[u8]) -> Self {
+        let slot_count = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+        let row_count = u16::from_le_bytes([buf[2], buf[3]]) as usize;
+        let capacity = u16::from_le_bytes([buf[4], buf[5]]) as usize;
+
+        // ---- slots ----
+        let mut slots = Vec::with_capacity(slot_count);
+        let mut offset = HEADER_SIZE;
+
+        for _ in 0..slot_count {
+            let off = u16::from_le_bytes([buf[offset], buf[offset + 1]]);
+            let used = buf[offset + 2] != 0;
+            slots.push(Slot {
+                offset: off as u32,
+                used,
+            });
+            offset += SLOT_SIZE;
+        }
+
+        // ---- rows ----
+        let mut rows = Vec::with_capacity(row_count);
+        let mut row_ptr = HEADER_SIZE + SLOT_SIZE * slot_count;
+
+        for _ in 0..row_count {
+            let val_count = u16::from_le_bytes([buf[row_ptr], buf[row_ptr + 1]]) as usize;
+            row_ptr += 2;
+
+            let mut values = Vec::with_capacity(val_count);
+            let mut slice = &buf[row_ptr..];
+
+            for _ in 0..val_count {
+                let v = Value::deserialize(&mut slice);
+                values.push(v);
+            }
+
+            let consumed = buf[row_ptr..].len() - slice.len();
+            row_ptr += consumed;
+
+            rows.push(StorageRow {
+                rid: RowId {
+                    page_id: id,
+                    slot_id: 0, // filled via slot lookup
+                },
+                values,
+            });
+        }
+
+        // ---- free slots ----
+        let free_slots = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| if !s.used { Some(i as u16) } else { None })
+            .collect();
+
+        Self {
+            id,
+            slots,
+            rows,
+            free_slots,
+            capacity,
+        }
     }
 }
 
@@ -161,7 +341,7 @@ impl Page for RowPage {
     }
 
     fn num_rows(&self) -> usize {
-        self.slots.iter().filter(|s| s.row.is_some()).count()
+        self.num_rows()
     }
 
     fn is_full(&self) -> bool {
@@ -169,13 +349,44 @@ impl Page for RowPage {
     }
 
     fn get_row(&self, slot_id: u16) -> Option<&StorageRow> {
-        self.slots.get(slot_id as usize).unwrap().row.as_ref()
+        self.get(slot_id)
+    }
+}
+
+impl<'a> HeapPageHandle<'a> {
+    pub fn load(page_id: PageId, pm: &'a mut dyn PageManager) -> Self {
+        Self { page_id, pm }
+    }
+
+    pub fn read(&mut self) -> RowPage {
+        let frame = self.pm.fetch_page(self.page_id);
+        RowPage::from_bytes(self.page_id, &frame.data)
+    }
+}
+
+impl<'a> HeapPageHandle<'a> {
+    pub fn write(&mut self, page: &RowPage) {
+        let frame = self.pm.fetch_page(self.page_id);
+        page.write_bytes(&mut frame.data);
+        frame.dirty = true;
+    }
+}
+
+impl RowPage {
+    #[cfg(debug_assertions)]
+    fn assert_consistent(&self) {
+        for slot in &self.slots {
+            if slot.used {
+                assert!((slot.offset as usize) < self.rows.len());
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
+        buffer::frame::PAGE_SIZE,
         common::value::Value,
         storage::page::{Page, PageId, RowId, RowPage, StorageRow},
     };
@@ -194,11 +405,11 @@ mod tests {
     fn page_respects_capacity() {
         let mut page = RowPage::new(PageId(1), 2);
 
-        assert!(page.push(srow(vec![Value::Int64(1)])).is_ok());
-        assert!(page.push(srow(vec![Value::Int64(2)])).is_ok());
+        assert!(page.insert(vec![Value::Int64(1)]).is_some());
+        assert!(page.insert(vec![Value::Int64(2)]).is_some());
 
         assert!(page.is_full());
-        assert!(page.push(srow(vec![Value::Int64(3)])).is_err());
+        assert!(page.insert(vec![Value::Int64(3)]).is_none());
     }
 
     #[test]
@@ -209,10 +420,12 @@ mod tests {
         assert_eq!(page.num_rows(), 0);
         assert!(!page.is_full());
 
-        page.push(srow(vec![Value::Int64(1)])).unwrap();
+        page.insert(vec![Value::Int64(1)]).unwrap();
         assert_eq!(page.num_rows(), 1);
+        assert!(!page.is_full());
 
-        page.push(srow(vec![Value::Int64(2)])).unwrap();
+        page.insert(vec![Value::Int64(2)]).unwrap();
+        assert_eq!(page.num_rows(), 2);
         assert!(page.is_full());
     }
 
@@ -220,9 +433,42 @@ mod tests {
     fn get_row_returns_correct_slot() {
         let mut page = RowPage::new(PageId(0), 1);
 
-        let rid = page.push(srow(vec![Value::Int64(42)])).unwrap();
+        let rid = page.insert(vec![Value::Int64(42)]).unwrap();
         let row = page.get_row(rid.slot_id).unwrap();
 
         assert_eq!(row.values[0], Value::Int64(42));
+    }
+
+    #[test]
+    fn row_page_roundtrip() {
+        let mut page = RowPage::new(PageId(1), 10);
+
+        let r1 = page.insert(vec![Value::Int64(10)]).unwrap();
+        let r2 = page.insert(vec![Value::Int64(20)]).unwrap();
+
+        page.delete(r1.slot_id);
+
+        let data = page.to_data();
+        let page2 = RowPage::from_data(data);
+
+        assert!(page2.get(r1.slot_id).is_none());
+        assert_eq!(page2.get(r2.slot_id).unwrap().values[0], Value::Int64(20));
+    }
+
+    #[test]
+    fn row_page_disk_roundtrip() {
+        let mut page = RowPage::new(PageId(1), 10);
+
+        let r1 = page.insert(vec![Value::Int64(10)]).unwrap();
+        let r2 = page.insert(vec![Value::Int64(20)]).unwrap();
+        page.delete(r1.slot_id);
+
+        let mut buf = [0u8; PAGE_SIZE];
+        page.write_bytes(&mut buf);
+
+        let page2 = RowPage::from_bytes(PageId(1), &buf);
+
+        assert!(page2.get(r1.slot_id).is_none());
+        assert_eq!(page2.get(r2.slot_id).unwrap().values[0], Value::Int64(20));
     }
 }

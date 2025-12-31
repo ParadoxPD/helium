@@ -2,63 +2,105 @@ use crate::{
     exec::Catalog,
     ir::{
         expr::{BinaryOp, Expr},
-        plan::{IndexScan, LogicalPlan},
+        plan::{Filter, IndexPredicate, IndexScan, LogicalPlan, Project},
     },
 };
 
 pub fn index_selection(plan: &LogicalPlan, catalog: &Catalog) -> LogicalPlan {
     match plan {
-        LogicalPlan::Filter(f) => {
-            if let LogicalPlan::Scan(s) = &*f.input {
-                if let Expr::Binary {
-                    left,
-                    op: BinaryOp::Eq,
-                    right,
-                } = &f.predicate
+        LogicalPlan::Filter(filter) => {
+            // First, recursively optimize the input
+            let optimized_input = index_selection(&filter.input, catalog);
+
+            // We only care about Filter(Scan)
+            let LogicalPlan::Scan(scan) = &optimized_input else {
+                return LogicalPlan::Filter(Filter {
+                    predicate: filter.predicate.clone(),
+                    input: Box::new(optimized_input),
+                });
+            };
+
+            // Match: table.column = literal
+            if let Expr::Binary {
+                left,
+                op: BinaryOp::Eq,
+                right,
+            } = &filter.predicate
+            {
+                if let (Expr::BoundColumn { table, name }, Expr::Literal(value)) =
+                    (&**left, &**right)
                 {
-                    if let Expr::BoundColumn { table, name } = &**left {
-                        if let Expr::Literal(v) = &**right {
-                            if catalog[table].get_index(name).is_some() {
-                                return LogicalPlan::IndexScan(IndexScan {
-                                    table: s.table.clone(),
-                                    alias: s.alias.clone(),
-                                    column: name.clone(),
-                                    value: v.clone(),
-                                });
-                            }
+                    // Table name must match
+                    if table == &scan.table {
+                        // Check catalog for index
+                        if catalog.get_index(table, name).is_some() {
+                            return LogicalPlan::IndexScan(IndexScan {
+                                table: table.clone(),
+                                column: name.clone(),
+                                predicate: IndexPredicate::Eq(value.clone()),
+                            });
                         }
                     }
                 }
             }
-        }
-        _ => {}
-    }
 
-    plan.clone()
+            // Default: keep filter
+            LogicalPlan::Filter(Filter {
+                predicate: filter.predicate.clone(),
+                input: Box::new(optimized_input),
+            })
+        }
+
+        // Recurse into other nodes
+        LogicalPlan::Project(p) => LogicalPlan::Project(Project {
+            exprs: p.exprs.clone(),
+            input: Box::new(index_selection(&p.input, catalog)),
+        }),
+
+        _ => plan.clone(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
+    use crate::buffer::buffer_pool::BufferPool;
     use crate::common::value::Value;
     use crate::exec::Catalog;
     use crate::ir::expr::{BinaryOp, Expr};
     use crate::ir::plan::{Filter, IndexScan, LogicalPlan, Scan};
     use crate::optimizer::index_selection::index_selection;
+    use crate::storage::btree::DiskBPlusTree;
     use crate::storage::in_memory::InMemoryTable;
+    use crate::storage::page_manager::FilePageManager;
+    use crate::storage::table::HeapTable;
 
     #[test]
     fn filter_on_indexed_column_becomes_indexscan() {
-        let mut table =
-            InMemoryTable::new("users".into(), vec!["id".into(), "age".into()], Vec::new());
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
 
-        table.create_index("age", 4);
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
 
-        // 2. Build catalog
-        let mut catalog: Catalog = Catalog::new();
+        // ---- heap table (no indexes!) ----
+        let table = HeapTable::new(
+            "users".into(),
+            vec!["id".into(), "age".into()],
+            4,
+            bp.clone(),
+        );
+
+        // ---- disk index ----
+        let index = Arc::new(DiskBPlusTree::new(4, bp.clone()));
+
+        // ---- catalog ----
+        let mut catalog = Catalog::new();
         catalog.insert("users".into(), Arc::new(table));
+        catalog.add_index("users".into(), "age".into(), index);
 
+        // ---- logical plan ----
         let scan = LogicalPlan::Scan(Scan {
             table: "users".into(),
             alias: "users".into(),
@@ -89,7 +131,19 @@ mod tests {
 
     #[test]
     fn filter_without_index_remains_filter() {
-        let table = InMemoryTable::new("users".into(), vec!["id".into(), "age".into()], Vec::new());
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        // ---- heap table WITHOUT index ----
+        let table = HeapTable::new(
+            "users".into(),
+            vec!["id".into(), "age".into()],
+            4,
+            bp.clone(),
+        );
 
         let mut catalog: Catalog = Catalog::new();
         catalog.insert("users".into(), Arc::new(table));
@@ -114,6 +168,6 @@ mod tests {
 
         let optimized = index_selection(&filter, &catalog);
 
-        matches!(optimized, LogicalPlan::Filter(_));
+        assert!(matches!(optimized, LogicalPlan::Filter(_)));
     }
 }

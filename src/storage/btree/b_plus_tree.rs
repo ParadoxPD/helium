@@ -1,19 +1,14 @@
-pub mod cursor;
-pub mod internal;
-pub mod leaf;
-pub mod node;
-
-use crate::{
-    common::value::Value,
-    storage::{
-        btree::{
-            internal::InternalNode,
-            leaf::LeafNode,
-            node::{BPlusNode, Index, IndexKey, NodeId},
-        },
-        page::RowId,
+use crate::storage::{
+    btree::{
+        internal::InternalNode,
+        leaf::LeafNode,
+        node::{BPlusNode, Index, IndexKey},
     },
+    page::RowId,
 };
+
+#[derive(Debug, Clone)]
+pub struct NodeId(pub u64);
 
 pub struct BPlusTree {
     order: usize,
@@ -33,12 +28,11 @@ impl BPlusTree {
 
         Self {
             order,
-            root: 0,
+            root: NodeId(0),
             nodes: vec![BPlusNode::Leaf(root)],
         }
     }
-}
-impl BPlusTree {
+
     fn find_leaf(&self, key: &IndexKey) -> NodeId {
         let mut node = self.root;
 
@@ -55,8 +49,7 @@ impl BPlusTree {
             }
         }
     }
-}
-impl BPlusTree {
+
     pub fn insert(&mut self, key: IndexKey, rid: RowId) {
         if let Some((sep, right)) = self.insert_recursive(self.root, key, rid) {
             // Root split → grow tree height
@@ -69,6 +62,7 @@ impl BPlusTree {
             self.nodes.push(BPlusNode::Internal(new_root));
         }
     }
+
     pub fn delete(&mut self, key: &IndexKey, rid: RowId) {
         self.delete_recursive(self.root, key, rid);
 
@@ -86,13 +80,10 @@ impl BPlusTree {
             }
         }
 
-        // ONLY now invariants must hold
         #[cfg(debug_assertions)]
         self.assert_invariants();
     }
-}
 
-impl BPlusTree {
     fn insert_into_leaf(&mut self, leaf_id: NodeId, key: IndexKey, rid: RowId) {
         let leaf = match &mut self.nodes[leaf_id] {
             BPlusNode::Leaf(l) => l,
@@ -114,8 +105,7 @@ impl BPlusTree {
             _ => false,
         }
     }
-}
-impl BPlusTree {
+
     pub fn get(&self, key: &IndexKey) -> Vec<RowId> {
         let leaf_id = self.find_leaf(key);
 
@@ -127,8 +117,7 @@ impl BPlusTree {
             _ => unreachable!(),
         }
     }
-}
-impl BPlusTree {
+
     pub fn range(&self, from: &IndexKey, to: &IndexKey) -> Vec<RowId> {
         let mut out = Vec::new();
         let mut node = self.find_leaf(from);
@@ -140,8 +129,11 @@ impl BPlusTree {
             };
 
             for (k, rids) in leaf.keys.iter().zip(&leaf.values) {
-                if k >= from && k <= to {
-                    out.extend(rids.iter().copied());
+                if k > to {
+                    return out;
+                }
+                if k >= from {
+                    out.extend_from_slice(rids);
                 }
             }
 
@@ -153,9 +145,7 @@ impl BPlusTree {
 
         out
     }
-}
 
-impl BPlusTree {
     fn insert_recursive(
         &mut self,
         node_id: NodeId,
@@ -167,9 +157,7 @@ impl BPlusTree {
                 self.insert_into_leaf(node_id, key, rid);
 
                 if self.leaf_overflow(node_id) {
-                    let res = self.split_leaf(node_id);
-                    self.assert_invariants();
-                    Some(res)
+                    Some(self.split_leaf(node_id))
                 } else {
                     None
                 }
@@ -187,9 +175,7 @@ impl BPlusTree {
                     self.insert_into_internal(node_id, sep, new_child);
 
                     if self.internal_overflow(node_id) {
-                        let res = self.split_internal(node_id);
-                        self.assert_invariants();
-                        Some(res)
+                        Some(self.split_internal(node_id))
                     } else {
                         None
                     }
@@ -219,10 +205,7 @@ impl BPlusTree {
                     Err(j) => j,
                 };
 
-                // extract child id WITHOUT holding mutable borrow
                 let child_id = i.children[idx];
-
-                // IMPORTANT: mutable borrow of parent ends here
 
                 let underflow = self.delete_recursive(child_id, key, rid);
 
@@ -230,7 +213,6 @@ impl BPlusTree {
                     self.rebalance_child(node_id, idx);
                 }
 
-                // reborrow parent to check keys
                 let i = match &self.nodes[node_id] {
                     BPlusNode::Internal(i) => i,
                     _ => unreachable!(),
@@ -270,7 +252,6 @@ impl BPlusTree {
     fn rebalance_leaf(&mut self, parent: NodeId, idx: usize) {
         let min_keys = self.min_keys();
 
-        // ---- read parent immutably ----
         let (left_idx, right_idx, sep_left, sep_right, leaf_id) = {
             let p = match &self.nodes[parent] {
                 BPlusNode::Internal(p) => p,
@@ -294,7 +275,7 @@ impl BPlusTree {
             )
         };
 
-        // ---- try borrow from LEFT leaf ----
+        // Try borrow from LEFT leaf
         if let (Some(lidx), Some(sep_idx)) = (left_idx, sep_left) {
             let left_id = {
                 let p = match &self.nodes[parent] {
@@ -317,20 +298,12 @@ impl BPlusTree {
                     (BPlusNode::Leaf(l), BPlusNode::Leaf(c)) => (l, c),
                     _ => unreachable!(),
                 };
+
                 leaf.keys.insert(0, left.keys.pop().unwrap());
                 leaf.values.insert(0, left.values.pop().unwrap());
 
-                let new_sep = {
-                    let p = match &self.nodes[parent] {
-                        BPlusNode::Internal(p) => p,
-                        _ => unreachable!(),
-                    };
-                    let right_child_id = p.children[sep_idx + 1];
-                    match &self.nodes[right_child_id] {
-                        BPlusNode::Leaf(l) => l.keys[0].clone(),
-                        BPlusNode::Internal(i) => i.keys[0].clone(),
-                    }
-                };
+                // Separator must be the min key of the RIGHT child (which is leaf after borrow)
+                let new_sep = leaf.keys[0].clone();
 
                 let p = match &mut self.nodes[parent] {
                     BPlusNode::Internal(p) => p,
@@ -342,7 +315,7 @@ impl BPlusTree {
             }
         }
 
-        // ---- try borrow from RIGHT leaf ----
+        // Try borrow from RIGHT leaf
         if let (Some(ridx), Some(sep_idx)) = (right_idx, sep_right) {
             let right_id = {
                 let p = match &self.nodes[parent] {
@@ -369,17 +342,8 @@ impl BPlusTree {
                 leaf.keys.push(right.keys.remove(0));
                 leaf.values.push(right.values.remove(0));
 
-                let new_sep = {
-                    let p = match &self.nodes[parent] {
-                        BPlusNode::Internal(p) => p,
-                        _ => unreachable!(),
-                    };
-                    let right_child_id = p.children[sep_idx + 1];
-                    match &self.nodes[right_child_id] {
-                        BPlusNode::Leaf(l) => l.keys[0].clone(),
-                        BPlusNode::Internal(i) => i.keys[0].clone(),
-                    }
-                };
+                // Separator must be the min key of the RIGHT child (which is right after borrow)
+                let new_sep = right.keys[0].clone();
 
                 let p = match &mut self.nodes[parent] {
                     BPlusNode::Internal(p) => p,
@@ -391,7 +355,7 @@ impl BPlusTree {
             }
         }
 
-        // ---- must MERGE ----
+        // Must MERGE
         let (left, right, sep_idx) = if let Some(lidx) = left_idx {
             (lidx, idx, lidx)
         } else {
@@ -432,8 +396,7 @@ impl BPlusTree {
     }
 
     fn rebalance_internal_node(&mut self, parent: NodeId, idx: usize) {
-        // ---- Step 1: read parent immutably ----
-        let (left_idx, right_idx, sep_idx, left_id, right_id) = {
+        let (left_idx, right_idx) = {
             let parent_node = match &self.nodes[parent] {
                 BPlusNode::Internal(p) => p,
                 _ => unreachable!(),
@@ -446,35 +409,46 @@ impl BPlusTree {
                 None
             };
 
-            let sep_idx = if idx > 0 { idx - 1 } else { idx };
-
-            let left_id = left_idx.map(|i| parent_node.children[i]);
-            let right_id = right_idx.map(|i| parent_node.children[i]);
-
-            (left_idx, right_idx, sep_idx, left_id, right_id)
+            (left_idx, right_idx)
         };
 
-        // ---- Step 2: try borrow from LEFT ----
-        if let (Some(lidx), Some(lid)) = (left_idx, left_id) {
-            if self.node_key_count(lid) > self.min_keys() {
-                self.borrow_from_left(parent, lidx, idx, sep_idx);
+        // Try borrow from LEFT
+        if let Some(lidx) = left_idx {
+            let left_id = {
+                let parent_node = match &self.nodes[parent] {
+                    BPlusNode::Internal(p) => p,
+                    _ => unreachable!(),
+                };
+                parent_node.children[lidx]
+            };
+
+            if self.node_key_count(left_id) > self.min_keys() {
+                self.borrow_from_left(parent, lidx, idx);
                 return;
             }
         }
 
-        // ---- Step 3: try borrow from RIGHT ----
-        if let (Some(ridx), Some(rid)) = (right_idx, right_id) {
-            if self.node_key_count(rid) > self.min_keys() {
-                self.borrow_from_right(parent, idx, ridx, sep_idx);
+        // Try borrow from RIGHT
+        if let Some(ridx) = right_idx {
+            let right_id = {
+                let parent_node = match &self.nodes[parent] {
+                    BPlusNode::Internal(p) => p,
+                    _ => unreachable!(),
+                };
+                parent_node.children[ridx]
+            };
+
+            if self.node_key_count(right_id) > self.min_keys() {
+                self.borrow_from_right(parent, idx, ridx);
                 return;
             }
         }
 
-        // ---- Step 4: must merge ----
-        let (left, right) = if idx > 0 {
-            (idx - 1, idx)
+        // Must merge
+        let (left, right, sep_idx) = if idx > 0 {
+            (idx - 1, idx, idx - 1)
         } else {
-            (idx, idx + 1)
+            (idx, idx + 1, idx)
         };
 
         let (left_id, right_id) = {
@@ -488,57 +462,9 @@ impl BPlusTree {
         self.merge_nodes(parent, left, right, sep_idx, left_id, right_id);
     }
 
-    fn borrow_internal_from_left(
-        &mut self,
-        parent: NodeId,
-        left_idx: usize,
-        child_idx: usize,
-        sep_idx: usize,
-    ) {
-        // extract child ids
-        let (left_id, child_id) = {
-            let p = match &self.nodes[parent] {
-                BPlusNode::Internal(p) => p,
-                _ => unreachable!(),
-            };
-            (p.children[left_idx], p.children[child_idx])
-        };
+    fn borrow_from_left(&mut self, parent: NodeId, left_idx: usize, child_idx: usize) {
+        let sep_idx = left_idx;
 
-        // split borrow
-        let (left, child) = if left_id < child_id {
-            let (l, r) = self.nodes.split_at_mut(child_id);
-            (&mut l[left_id], &mut r[0])
-        } else {
-            let (l, r) = self.nodes.split_at_mut(left_id);
-            (&mut r[0], &mut l[child_id])
-        };
-
-        let (left, child) = match (left, child) {
-            (BPlusNode::Internal(l), BPlusNode::Internal(c)) => (l, c),
-            _ => unreachable!(),
-        };
-
-        // move ONE child pointer
-        let borrowed_child = left.children.pop().unwrap();
-        child.children.insert(0, borrowed_child);
-
-        // recompute separator = min key of RIGHT child
-        let new_sep = self.min_key(child.children[0]);
-
-        let p = match &mut self.nodes[parent] {
-            BPlusNode::Internal(p) => p,
-            _ => unreachable!(),
-        };
-        p.keys[sep_idx] = new_sep;
-    }
-
-    fn borrow_from_left(
-        &mut self,
-        parent: NodeId,
-        left_idx: usize,
-        child_idx: usize,
-        sep_idx: usize,
-    ) {
         let sep = {
             let p = match &mut self.nodes[parent] {
                 BPlusNode::Internal(p) => p,
@@ -547,32 +473,31 @@ impl BPlusTree {
             p.keys[sep_idx].clone()
         };
 
-        let (left, child) = {
-            let left_id;
-            let child_id;
-            {
-                let p = match &self.nodes[parent] {
-                    BPlusNode::Internal(p) => p,
-                    _ => unreachable!(),
-                };
-                left_id = p.children[left_idx];
-                child_id = p.children[child_idx];
-            }
+        let (left_id, child_id) = {
+            let p = match &self.nodes[parent] {
+                BPlusNode::Internal(p) => p,
+                _ => unreachable!(),
+            };
+            (p.children[left_idx], p.children[child_idx])
+        };
 
-            if left_id < child_id {
-                let (l, r) = self.nodes.split_at_mut(child_id);
-                (&mut l[left_id], &mut r[0])
-            } else {
-                let (l, r) = self.nodes.split_at_mut(left_id);
-                (&mut r[0], &mut l[child_id])
-            }
+        let (left, child) = if left_id < child_id {
+            let (l, r) = self.nodes.split_at_mut(child_id);
+            (&mut l[left_id], &mut r[0])
+        } else {
+            let (l, r) = self.nodes.split_at_mut(left_id);
+            (&mut r[0], &mut l[child_id])
         };
 
         match (left, child) {
             (BPlusNode::Internal(l), BPlusNode::Internal(c)) => {
+                // Move separator down to child
                 c.keys.insert(0, sep);
-                let borrowed = l.keys.pop().unwrap();
 
+                // Move last key from left up as new separator
+                let new_sep = l.keys.pop().unwrap();
+
+                // Move last child pointer from left to child
                 let child_ptr = l.children.pop().unwrap();
                 c.children.insert(0, child_ptr);
 
@@ -580,19 +505,23 @@ impl BPlusTree {
                     BPlusNode::Internal(p) => p,
                     _ => unreachable!(),
                 };
-                p.keys[sep_idx] = borrowed;
+                p.keys[sep_idx] = new_sep;
             }
             _ => unreachable!(),
         }
     }
 
-    fn borrow_internal_from_right(
-        &mut self,
-        parent: NodeId,
-        child_idx: usize,
-        right_idx: usize,
-        sep_idx: usize,
-    ) {
+    fn borrow_from_right(&mut self, parent: NodeId, child_idx: usize, right_idx: usize) {
+        let sep_idx = child_idx;
+
+        let sep = {
+            let p = match &mut self.nodes[parent] {
+                BPlusNode::Internal(p) => p,
+                _ => unreachable!(),
+            };
+            p.keys[sep_idx].clone()
+        };
+
         let (child_id, right_id) = {
             let p = match &self.nodes[parent] {
                 BPlusNode::Internal(p) => p,
@@ -609,66 +538,15 @@ impl BPlusTree {
             (&mut r[0], &mut l[right_id])
         };
 
-        let (child, right) = match (child, right) {
-            (BPlusNode::Internal(c), BPlusNode::Internal(r)) => (c, r),
-            _ => unreachable!(),
-        };
-
-        // move ONE child pointer
-        let borrowed_child = right.children.remove(0);
-        child.children.push(borrowed_child);
-
-        // recompute separator
-        let new_sep = self.min_key(right.children[0]);
-
-        let p = match &mut self.nodes[parent] {
-            BPlusNode::Internal(p) => p,
-            _ => unreachable!(),
-        };
-        p.keys[sep_idx] = new_sep;
-    }
-
-    fn borrow_from_right(
-        &mut self,
-        parent: NodeId,
-        child_idx: usize,
-        right_idx: usize,
-        sep_idx: usize,
-    ) {
-        let sep = {
-            let p = match &mut self.nodes[parent] {
-                BPlusNode::Internal(p) => p,
-                _ => unreachable!(),
-            };
-            p.keys[sep_idx].clone()
-        };
-
-        let (child, right) = {
-            let child_id;
-            let right_id;
-            {
-                let p = match &self.nodes[parent] {
-                    BPlusNode::Internal(p) => p,
-                    _ => unreachable!(),
-                };
-                child_id = p.children[child_idx];
-                right_id = p.children[right_idx];
-            }
-
-            if child_id < right_id {
-                let (l, r) = self.nodes.split_at_mut(right_id);
-                (&mut l[child_id], &mut r[0])
-            } else {
-                let (l, r) = self.nodes.split_at_mut(child_id);
-                (&mut r[0], &mut l[right_id])
-            }
-        };
-
         match (child, right) {
             (BPlusNode::Internal(c), BPlusNode::Internal(r)) => {
+                // Move separator down to child
                 c.keys.push(sep);
-                let borrowed = r.keys.remove(0);
 
+                // Move first key from right up as new separator
+                let new_sep = r.keys.remove(0);
+
+                // Move first child pointer from right to child
                 let child_ptr = r.children.remove(0);
                 c.children.push(child_ptr);
 
@@ -676,7 +554,7 @@ impl BPlusTree {
                     BPlusNode::Internal(p) => p,
                     _ => unreachable!(),
                 };
-                p.keys[sep_idx] = borrowed;
+                p.keys[sep_idx] = new_sep;
             }
             _ => unreachable!(),
         }
@@ -685,7 +563,7 @@ impl BPlusTree {
     fn merge_nodes(
         &mut self,
         parent: NodeId,
-        left_idx: usize,
+        _left_idx: usize,
         right_idx: usize,
         sep_idx: usize,
         left_id: NodeId,
@@ -730,8 +608,7 @@ impl BPlusTree {
 
         parent_node.children.remove(right_idx);
     }
-}
-impl BPlusTree {
+
     fn insert_into_internal(&mut self, node_id: NodeId, key: IndexKey, right_child: NodeId) {
         let internal = match &mut self.nodes[node_id] {
             BPlusNode::Internal(i) => i,
@@ -753,8 +630,7 @@ impl BPlusTree {
             BPlusNode::Internal(i) if i.keys.len() > self.max_keys()
         )
     }
-}
-impl BPlusTree {
+
     fn split_leaf(&mut self, leaf_id: NodeId) -> (IndexKey, NodeId) {
         let new_leaf_id = self.nodes.len();
 
@@ -781,8 +657,7 @@ impl BPlusTree {
         self.nodes.push(BPlusNode::Leaf(new_leaf));
         (separator, new_leaf_id)
     }
-}
-impl BPlusTree {
+
     fn split_internal(&mut self, node_id: NodeId) -> (IndexKey, NodeId) {
         let new_internal_id = self.nodes.len();
 
@@ -792,12 +667,10 @@ impl BPlusTree {
         };
 
         let mid = internal.keys.len() / 2;
-        let separator = internal.keys[mid].clone();
+        let separator = internal.keys.remove(mid);
 
-        let right_keys = internal.keys.split_off(mid + 1);
+        let right_keys = internal.keys.split_off(mid);
         let right_children = internal.children.split_off(mid + 1);
-
-        internal.keys.truncate(mid);
 
         let new_internal = InternalNode {
             keys: right_keys,
@@ -817,13 +690,6 @@ impl BPlusTree {
 
     fn min_keys(&self) -> usize {
         (self.order - 1) / 2
-    }
-
-    fn min_key(&self, node: NodeId) -> IndexKey {
-        match &self.nodes[node] {
-            BPlusNode::Leaf(l) => l.keys[0].clone(),
-            BPlusNode::Internal(i) => self.min_key(i.children[0]),
-        }
     }
 }
 
@@ -902,121 +768,6 @@ impl BPlusTree {
                     self.assert_node(child, visited);
                 }
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::storage::page::PageId;
-
-    use super::*;
-
-    fn rid(n: u64) -> RowId {
-        RowId {
-            page_id: PageId(0),
-            slot_id: n as u16,
-        }
-    }
-
-    #[test]
-    fn insert_and_get_single_key() {
-        let mut tree = BPlusTree::new(4);
-
-        tree.insert(IndexKey::Int64(10), rid(1));
-        tree.insert(IndexKey::Int64(10), rid(2));
-
-        let rids = tree.get(&IndexKey::Int64(10));
-        assert_eq!(rids.len(), 2);
-        assert!(rids.contains(&rid(1)));
-        assert!(rids.contains(&rid(2)));
-    }
-
-    #[test]
-    fn leaf_split_and_lookup() {
-        let mut tree = BPlusTree::new(3);
-
-        for i in 0..10 {
-            tree.insert(IndexKey::Int64(i), rid(i as u64));
-        }
-
-        for i in 0..10 {
-            let r = tree.get(&IndexKey::Int64(i));
-            assert_eq!(r, vec![rid(i as u64)]);
-        }
-    }
-
-    #[test]
-    fn range_query_across_leaves() {
-        let mut tree = BPlusTree::new(3);
-
-        for i in 0..20 {
-            tree.insert(IndexKey::Int64(i), rid(i as u64));
-        }
-
-        let rids = tree.range(&IndexKey::Int64(5), &IndexKey::Int64(12));
-        let expected: Vec<_> = (5..=12).map(|i| rid(i as u64)).collect();
-
-        assert_eq!(rids, expected);
-    }
-
-    #[test]
-    fn delete_and_rebalance() {
-        let mut tree = BPlusTree::new(3);
-
-        for i in 0..10 {
-            tree.insert(IndexKey::Int64(i), rid(i as u64));
-        }
-
-        for i in 0..10 {
-            tree.delete(&IndexKey::Int64(i), rid(i as u64));
-        }
-
-        for i in 0..10 {
-            assert!(tree.get(&IndexKey::Int64(i)).is_empty());
-        }
-    }
-
-    #[test]
-    fn delete_all_and_reinsert() {
-        let mut tree = BPlusTree::new(3);
-
-        for i in 0..20 {
-            tree.insert(IndexKey::Int64(i), rid(i as u64));
-        }
-
-        for i in 0..20 {
-            tree.delete(&IndexKey::Int64(i), rid(i as u64));
-        }
-
-        for i in 0..20 {
-            tree.insert(IndexKey::Int64(i), rid(i as u64));
-        }
-
-        for i in 0..20 {
-            assert_eq!(tree.get(&IndexKey::Int64(i)), vec![rid(i as u64)]);
-        }
-    }
-
-    #[test]
-    fn random_insert_delete_stress() {
-        use rand::{rng, seq::SliceRandom};
-
-        let mut tree = BPlusTree::new(4);
-        let mut keys: Vec<i64> = (0..200).collect();
-
-        for k in &keys {
-            tree.insert(IndexKey::Int64(*k), rid(*k as u64));
-        }
-
-        keys.shuffle(&mut rng());
-
-        for k in &keys {
-            tree.delete(&IndexKey::Int64(*k), rid(*k as u64));
-        }
-
-        for k in 0..200 {
-            assert!(tree.get(&IndexKey::Int64(k)).is_empty());
         }
     }
 }

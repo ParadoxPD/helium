@@ -1,7 +1,14 @@
 use crate::storage::{
     btree::node::{IndexKey, NodeId},
-    page::RowId,
+    page::{PageId, RowId},
 };
+
+#[derive(Clone)]
+pub struct DiskLeafNode {
+    pub keys: Vec<IndexKey>,
+    pub values: Vec<Vec<RowId>>,
+    pub next: Option<PageId>,
+}
 
 #[derive(Clone)]
 pub struct LeafNode {

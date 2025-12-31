@@ -52,9 +52,14 @@ pub struct Join {
 #[derive(Clone, Debug, PartialEq)]
 pub struct IndexScan {
     pub table: String,
-    pub alias: String,
     pub column: String,
-    pub value: Value,
+    pub predicate: IndexPredicate,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum IndexPredicate {
+    Eq(Value),
+    Range { low: Value, high: Value },
 }
 
 impl Limit {

@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use crate::{
+    buffer::buffer_pool::BufferPoolHandle,
     common::{schema::Schema, value::Value},
     exec::operator::Row,
     storage::{
         btree::node::Index,
-        page::{Page, PageId, RowId, RowPage, RowSlot, StorageRow},
+        page::{HeapPageHandle, Page, PageId, RowId, RowPage, RowSlot, StorageRow},
+        page_manager::PageManagerHandle,
     },
 };
 
@@ -13,7 +15,7 @@ pub trait Table: Send + Sync {
     fn scan(self: Arc<Self>) -> Box<dyn TableCursor>;
     fn schema(&self) -> &Schema;
     fn fetch(&self, rid: RowId) -> StorageRow;
-    fn get_index(&self, column: &str) -> Option<&dyn Index>;
+    fn get_index(&self, column: &str) -> Option<Arc<dyn Index>>;
 }
 
 pub trait TableCursor {
@@ -23,58 +25,102 @@ pub trait TableCursor {
 pub struct HeapTable {
     name: String,
     schema: Schema,
-    pages: Vec<RowPage>,
+    pages: Vec<PageId>,
     page_capacity: usize,
+    bp: BufferPoolHandle,
 }
 
 pub struct HeapTableCursor {
     table: Arc<HeapTable>,
     page_idx: usize,
-    row_idx: usize,
+    slot_idx: u16,
 }
 
 impl HeapTable {
-    pub fn new(name: String, schema: Vec<String>, page_capacity: usize) -> Self {
+    pub fn new(name: String, schema: Schema, page_capacity: usize, bp: BufferPoolHandle) -> Self {
+        let pid;
+        {
+            let mut bp = bp.lock().unwrap();
+            pid = bp.pm.allocate_page();
+
+            let page = RowPage::new(pid, page_capacity);
+            let frame = bp.fetch_page(pid);
+            page.write_bytes(&mut frame.data);
+            bp.unpin_page(pid, true);
+        }
+
         Self {
             name,
             schema,
-            pages: vec![RowPage::new(PageId(0), page_capacity)],
+            pages: vec![pid],
             page_capacity,
+            bp,
         }
     }
 
     pub fn insert(&mut self, values: Vec<Value>) -> RowId {
-        // Try last page
-        if let Some(last) = self.pages.last_mut() {
-            if let Some(rid) = last.insert(values.clone()) {
+        let last_pid = *self.pages.last().unwrap();
+
+        {
+            let mut bp = self.bp.lock().unwrap();
+            let frame = bp.fetch_page(last_pid);
+            let mut page = RowPage::from_bytes(last_pid, &frame.data);
+
+            if let Some(rid) = page.insert(values.clone()) {
+                page.write_bytes(&mut frame.data);
+                bp.unpin_page(last_pid, true);
                 return rid;
             }
+
+            bp.unpin_page(last_pid, false);
         }
 
-        // Allocate new page
-        let new_page_id = PageId(self.pages.len() as u64);
-        let mut page = RowPage::new(new_page_id, self.page_capacity);
+        let mut bp = self.bp.lock().unwrap();
+        let pid = bp.pm.allocate_page();
 
-        let rid = page.insert(values).expect("new page must have space");
+        let mut page = RowPage::new(pid, self.page_capacity);
+        let rid = page.insert(values).unwrap();
 
-        self.pages.push(page);
+        let frame = bp.fetch_page(pid);
+        page.write_bytes(&mut frame.data);
+        bp.unpin_page(pid, true);
+
+        self.pages.push(pid);
         rid
     }
-    pub fn update(&mut self, rid: RowId, new_values: Vec<Value>) -> bool {
-        let page = match self.pages.get_mut(rid.page_id.0 as usize) {
-            Some(p) => p,
-            None => return false,
-        };
 
-        page.update(rid.slot_id, new_values)
+    pub fn update(&mut self, rid: RowId, values: Vec<Value>) -> bool {
+        let mut bp = self.bp.lock().unwrap();
+
+        let frame = bp.fetch_page(rid.page_id);
+        let mut page = RowPage::from_bytes(rid.page_id, &frame.data);
+
+        let ok = page.update(rid.slot_id, values);
+        if ok {
+            page.write_bytes(&mut frame.data);
+            bp.unpin_page(rid.page_id, true);
+        } else {
+            bp.unpin_page(rid.page_id, false);
+        }
+
+        ok
     }
-    pub fn delete(&mut self, rid: RowId) -> bool {
-        let page = match self.pages.get_mut(rid.page_id.0 as usize) {
-            Some(p) => p,
-            None => return false,
-        };
 
-        page.delete(rid.slot_id)
+    pub fn delete(&mut self, rid: RowId) -> bool {
+        let mut bp = self.bp.lock().unwrap();
+
+        let frame = bp.fetch_page(rid.page_id);
+        let mut page = RowPage::from_bytes(rid.page_id, &frame.data);
+
+        let ok = page.delete(rid.slot_id);
+        if ok {
+            page.write_bytes(&mut frame.data);
+            bp.unpin_page(rid.page_id, true);
+        } else {
+            bp.unpin_page(rid.page_id, false);
+        }
+
+        ok
     }
 }
 
@@ -86,15 +132,19 @@ impl Table for HeapTable {
     fn schema(&self) -> &Schema {
         &self.schema
     }
-    fn fetch(&self, rid: RowId) -> StorageRow {
-        let page = &self.pages[rid.page_id.0 as usize];
-        let slot = &page.slots[rid.slot_id as usize];
 
-        debug_assert!(slot.used);
-        slot.row.as_ref().unwrap().clone()
+    fn fetch(&self, rid: RowId) -> StorageRow {
+        let mut bp = self.bp.lock().unwrap();
+        let frame = bp.fetch_page(rid.page_id);
+        let page = RowPage::from_bytes(rid.page_id, &frame.data);
+
+        let row = page.get(rid.slot_id).expect("invalid RowId").clone();
+
+        bp.unpin_page(rid.page_id, false);
+        row
     }
 
-    fn get_index(&self, _column: &str) -> Option<&dyn Index> {
+    fn get_index(&self, _column: &str) -> Option<Arc<dyn Index>> {
         None
     }
 }
@@ -104,48 +154,62 @@ impl HeapTableCursor {
         Self {
             table,
             page_idx: 0,
-            row_idx: 0,
+            slot_idx: 0,
         }
     }
 }
 
 impl TableCursor for HeapTableCursor {
     fn next(&mut self) -> Option<StorageRow> {
-        while self.page_idx < self.table.pages.len() {
-            let page = &self.table.pages[self.page_idx];
+        loop {
+            if self.page_idx >= self.table.pages.len() {
+                return None;
+            }
 
-            while self.row_idx < page.slots.len() {
-                let slot = &page.slots[self.row_idx];
-                self.row_idx += 1;
+            let pid = self.table.pages[self.page_idx];
 
-                if slot.used {
-                    return slot.row.clone();
+            let mut bp = self.table.bp.lock().unwrap();
+            let frame = bp.fetch_page(pid);
+            let page = RowPage::from_bytes(pid, &frame.data);
+
+            while self.slot_idx < page.capacity() as u16 {
+                let slot = self.slot_idx;
+                self.slot_idx += 1;
+
+                if let Some(row) = page.get(slot) {
+                    let result = row.clone();
+                    bp.unpin_page(pid, false);
+                    return Some(result);
                 }
             }
 
-            self.page_idx += 1;
-            self.row_idx = 0;
-        }
+            bp.unpin_page(pid, false);
 
-        None
+            self.page_idx += 1;
+            self.slot_idx = 0;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use crate::{
+        buffer::buffer_pool::BufferPool,
         common::value::Value,
         storage::{
             page::{RowId, StorageRow},
+            page_manager::FilePageManager,
             table::{HeapTable, Table},
         },
     };
 
     #[test]
     fn heap_table_grows_pages() {
-        let mut t = HeapTable::new("t".into(), vec!["id".into()], 2);
+        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
+        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
+        let mut t = HeapTable::new("t".into(), vec!["id".into()], 2, bp);
 
         t.insert(vec![Value::Int64(1)]);
         t.insert(vec![Value::Int64(2)]);
@@ -156,7 +220,9 @@ mod tests {
 
     #[test]
     fn heap_cursor_scans_all_rows() {
-        let mut t = HeapTable::new("t".into(), vec!["id".into()], 2);
+        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
+        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
+        let mut t = HeapTable::new("t".into(), vec!["id".into()], 2, bp);
 
         t.insert(vec![Value::Int64(1)]);
         t.insert(vec![Value::Int64(2)]);
@@ -175,7 +241,9 @@ mod tests {
 
     #[test]
     fn insert_returns_stable_row_ids() {
-        let mut table = HeapTable::new("users".into(), vec!["id".into()], 2);
+        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
+        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
+        let mut table = HeapTable::new("users".into(), vec!["id".into()], 2, bp);
 
         let r1 = table.insert(vec![Value::Int64(1)]);
         let r2 = table.insert(vec![Value::Int64(2)]);
@@ -187,7 +255,9 @@ mod tests {
 
     #[test]
     fn insert_allocates_new_page_when_full() {
-        let mut table = HeapTable::new("users".into(), vec!["id".into()], 1);
+        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
+        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
+        let mut table = HeapTable::new("users".into(), vec!["id".into()], 1, bp);
 
         let r1 = table.insert(vec![Value::Int64(1)]);
         let r2 = table.insert(vec![Value::Int64(2)]);
@@ -197,20 +267,21 @@ mod tests {
 
     #[test]
     fn delete_hides_row_but_preserves_slot() {
-        let mut table = HeapTable::new("users".into(), vec!["id".into()], 2);
+        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
+        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
+        let mut table = HeapTable::new("users".into(), vec!["id".into()], 2, bp);
 
         let r1 = table.insert(vec![Value::Int64(1)]);
         let r2 = table.insert(vec![Value::Int64(2)]);
 
         assert!(table.delete(r1));
 
+        let table: Arc<dyn Table> = Arc::new(table);
+        let mut cursor = table.scan();
+
         let mut seen = Vec::new();
-        for page in &table.pages {
-            for slot in &page.slots {
-                if let Some(row) = &slot.row {
-                    seen.push(row.clone());
-                }
-            }
+        while let Some(row) = cursor.next() {
+            seen.push(row);
         }
 
         assert_eq!(seen.len(), 1);
@@ -219,7 +290,9 @@ mod tests {
 
     #[test]
     fn update_overwrites_row_in_place() {
-        let mut table = HeapTable::new("users".into(), vec!["age".into()], 2);
+        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
+        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
+        let mut table = HeapTable::new("users".into(), vec!["age".into()], 2, bp);
 
         let rid = table.insert(vec![Value::Int64(20)]);
 
@@ -234,7 +307,9 @@ mod tests {
 
     #[test]
     fn update_fails_on_deleted_row() {
-        let mut table = HeapTable::new("users".into(), vec!["x".into()], 1);
+        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
+        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
+        let mut table = HeapTable::new("users".into(), vec!["x".into()], 1, bp);
 
         let rid = table.insert(vec![Value::Int64(1)]);
         table.delete(rid);
@@ -244,7 +319,9 @@ mod tests {
 
     #[test]
     fn update_preserves_slot_id() {
-        let mut table = HeapTable::new("t".into(), vec!["x".into()], 1);
+        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
+        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
+        let mut table = HeapTable::new("t".into(), vec!["x".into()], 1, bp);
 
         let rid = table.insert(vec![Value::Int64(1)]);
         table.update(rid, vec![Value::Int64(99)]);
@@ -253,5 +330,41 @@ mod tests {
         let r = cursor.next().unwrap();
 
         assert_eq!(r.rid.slot_id, rid.slot_id);
+    }
+
+    #[test]
+    fn heap_table_disk_roundtrip() {
+        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
+        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
+
+        let mut table = HeapTable::new("t".into(), vec!["x".into()], 4, bp);
+
+        let r1 = table.insert(vec![Value::Int64(1)]);
+        let r2 = table.insert(vec![Value::Int64(2)]);
+
+        table.delete(r1);
+
+        let v = table.fetch(r2);
+        assert_eq!(v.values[0], Value::Int64(2));
+    }
+
+    #[test]
+    fn buffer_pool_caches_pages() {
+        let pm = Box::new(FilePageManager::open("/tmp/bp.db").unwrap());
+        let mut bp = BufferPool::new(pm);
+
+        let pid = bp.pm.allocate_page();
+
+        {
+            let page = bp.fetch_page(pid);
+            page.data[0] = 99;
+            bp.unpin_page(pid, true);
+        }
+
+        bp.flush_all();
+
+        let page = bp.fetch_page(pid);
+        assert_eq!(page.data[0], 99);
+        bp.unpin_page(pid, false);
     }
 }

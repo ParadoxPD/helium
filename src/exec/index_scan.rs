@@ -3,15 +3,22 @@ use std::sync::Arc;
 use crate::{
     common::value::Value,
     exec::operator::{Operator, Row},
-    storage::{btree::node::IndexKey, page::RowId, table::Table},
+    ir::plan::IndexPredicate,
+    storage::{
+        btree::{
+            DiskBPlusTree,
+            node::{Index, IndexKey},
+        },
+        page::{RowId, StorageRow},
+        table::Table,
+    },
 };
 
 pub struct IndexScanExec<'a> {
     table: Arc<dyn Table + 'a>,
-    index_col: String,
-    key: Value,
+    index: Arc<dyn Index + 'a>,
+    predicate: IndexPredicate,
 
-    alias: String,
     schema: Vec<String>,
 
     rids: Vec<RowId>,
@@ -21,16 +28,14 @@ pub struct IndexScanExec<'a> {
 impl<'a> IndexScanExec<'a> {
     pub fn new(
         table: Arc<dyn Table + 'a>,
-        index_col: String,
-        key: Value,
-        alias: String,
+        index: Arc<dyn Index + 'a>,
+        predicate: IndexPredicate,
         schema: Vec<String>,
     ) -> Self {
         Self {
             table,
-            index_col,
-            key,
-            alias,
+            index,
+            predicate,
             schema,
             rids: Vec::new(),
             pos: 0,
@@ -40,15 +45,21 @@ impl<'a> IndexScanExec<'a> {
 
 impl<'a> Operator for IndexScanExec<'a> {
     fn open(&mut self) {
-        let index = self
-            .table
-            .get_index(&self.index_col)
-            .expect("IndexScanExec: index not found");
-
-        let key = IndexKey::try_from(&self.key).expect("IndexScanExec: invalid index key type");
-
-        self.rids = index.get(&key);
+        self.rids.clear();
         self.pos = 0;
+
+        match &self.predicate {
+            IndexPredicate::Eq(v) => {
+                let key = IndexKey::try_from(v);
+                self.rids = self.index.get(&key.unwrap());
+            }
+
+            IndexPredicate::Range { low, high } => {
+                let low_k = IndexKey::try_from(low);
+                let high_k = IndexKey::try_from(high);
+                self.rids = self.index.range(&low_k.unwrap(), &high_k.unwrap());
+            }
+        }
     }
 
     fn next(&mut self) -> Option<Row> {
@@ -59,21 +70,13 @@ impl<'a> Operator for IndexScanExec<'a> {
         let rid = self.rids[self.pos];
         self.pos += 1;
 
-        let storage_row = self.table.fetch(rid);
-
-        let mut out = Row::new();
-        let schema = self.table.schema();
-
-        for (col, value) in schema.iter().zip(storage_row.values.into_iter()) {
-            out.insert(format!("{}.{}", self.alias, col), value);
-        }
-
-        debug_assert!(
-            out.keys().all(|k| k.matches('.').count() == 1),
-            "IndexScanExec must emit exactly one qualification level"
-        );
-
-        Some(out)
+        Some(
+            self.schema
+                .iter()
+                .cloned()
+                .zip(self.table.fetch(rid).values.into_iter())
+                .collect(),
+        )
     }
 
     fn close(&mut self) {
@@ -84,12 +87,18 @@ impl<'a> Operator for IndexScanExec<'a> {
 
 #[cfg(test)]
 mod tests {
+    use crate::buffer::buffer_pool::BufferPool;
     use crate::common::value::Value;
     use crate::exec::index_scan::IndexScanExec;
     use crate::exec::operator::Operator;
+    use crate::ir::plan::IndexPredicate;
+    use crate::storage::btree::DiskBPlusTree;
+    use crate::storage::btree::node::{Index, IndexKey};
     use crate::storage::in_memory::InMemoryTable;
     use crate::storage::page::{PageId, RowId, StorageRow};
-    use std::sync::Arc;
+    use crate::storage::page_manager::FilePageManager;
+    use crate::storage::table::{HeapTable, Table};
+    use std::sync::{Arc, Mutex};
 
     fn make_table() -> Arc<InMemoryTable> {
         let mut table =
@@ -125,14 +134,53 @@ mod tests {
 
     #[test]
     fn index_scan_exec_returns_matching_rows() {
-        let table = make_table();
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
 
-        let mut exec = IndexScanExec::new(
-            table.clone(),
-            "age".into(),
-            Value::Int64(20),
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        // -------- create table --------
+        let mut table = HeapTable::new(
             "users".into(),
             vec!["id".into(), "age".into()],
+            4,
+            bp.clone(),
+        );
+
+        // -------- create index --------
+        let mut index = DiskBPlusTree::new(4, bp.clone());
+
+        // -------- insert rows + index entries --------
+        // We want age = 20 to appear twice
+        let rows = vec![
+            vec![Value::Int64(1), Value::Int64(20)],
+            vec![Value::Int64(2), Value::Int64(20)],
+            vec![Value::Int64(3), Value::Int64(30)],
+            vec![Value::Int64(4), Value::Int64(40)],
+        ];
+
+        for row in rows {
+            let rid = table.insert(row.clone());
+
+            // index on "age" column (index key = row[1])
+            let age = match &row[1] {
+                Value::Int64(v) => *v,
+                _ => unreachable!(),
+            };
+
+            index.insert(IndexKey::Int64(age), rid);
+        }
+
+        let table: Arc<dyn Table> = Arc::new(table);
+        let index: Arc<dyn Index> = Arc::new(index);
+
+        // -------- run index scan --------
+        let mut exec = IndexScanExec::new(
+            table.clone(),
+            index.clone(),
+            IndexPredicate::Eq(Value::Int64(20)),
+            table.schema().to_vec(),
         );
 
         exec.open();
@@ -142,12 +190,11 @@ mod tests {
             rows.push(row);
         }
 
-        exec.close();
-
+        // -------- assertions --------
         assert_eq!(rows.len(), 2);
 
         for r in rows {
-            assert_eq!(r["users.age"], Value::Int64(20));
+            assert_eq!(r["age"], Value::Int64(20));
         }
     }
 }

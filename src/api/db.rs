@@ -1,6 +1,7 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use crate::buffer::buffer_pool::BufferPool;
 use crate::common::schema::Schema;
 use crate::common::value::Value;
 use crate::exec::operator::Row;
@@ -11,11 +12,8 @@ use crate::ir::pretty::pretty;
 use crate::optimizer::optimize;
 use crate::storage::in_memory::InMemoryTable;
 use crate::storage::page::{PageId, RowId, StorageRow};
-use crate::storage::table::Table;
-
-pub struct Database {
-    catalog: HashMap<String, Arc<dyn Table>>,
-}
+use crate::storage::page_manager::FilePageManager;
+use crate::storage::table::{HeapTable, Table};
 
 #[derive(Debug)]
 pub enum QueryResult {
@@ -23,45 +21,43 @@ pub enum QueryResult {
     Explain(String),
 }
 
+pub struct Database {
+    catalog: Catalog,
+}
+
 impl Database {
     pub fn new() -> Self {
         Self {
-            catalog: HashMap::new(),
+            catalog: Catalog::new(),
         }
     }
 
     pub fn insert_table(&mut self, table: &str, schema: Schema, rows: Vec<Row>) {
-        let storage_rows = rows
-            .into_iter()
-            .enumerate()
-            .map(|(i, row)| {
-                let mut values = Vec::with_capacity(schema.len());
+        let path = format!("/tmp/{}.db", table);
 
-                for col in schema.clone() {
-                    // Accept both qualified and unqualified input
-                    let v = row
-                        .get(&format!("{table}.{col}"))
-                        .or_else(|| row.get(&col))
-                        .cloned()
-                        .unwrap_or(Value::Null);
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
 
-                    values.push(v);
-                }
+        let mut heap = HeapTable::new(table.to_string(), schema.clone(), 128, bp.clone());
 
-                StorageRow {
-                    rid: RowId {
-                        page_id: PageId(0),
-                        slot_id: i as u16,
-                    },
-                    values,
-                }
-            })
-            .collect();
+        for row in rows {
+            let mut values = Vec::with_capacity(schema.len());
 
-        self.catalog.insert(
-            table.to_string(),
-            Arc::new(InMemoryTable::new(table.to_string(), schema, storage_rows)),
-        );
+            for col in &schema {
+                let v = row
+                    .get(&format!("{table}.{col}"))
+                    .or_else(|| row.get(col))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+
+                values.push(v);
+            }
+
+            heap.insert(values);
+        }
+
+        self.catalog.insert(table.to_string(), Arc::new(heap));
     }
 
     pub fn query(&self, sql: &str) -> QueryResult {
@@ -78,6 +74,7 @@ impl Database {
                 while let Some(row) = exec.next() {
                     rows.push(row);
                 }
+
                 QueryResult::Rows(rows)
             }
 

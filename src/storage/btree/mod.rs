@@ -1,122 +1,399 @@
 pub mod cursor;
+pub mod disk;
 pub mod internal;
 pub mod leaf;
 pub mod node;
 
 use crate::{
+    buffer::{buffer_pool::BufferPoolHandle, frame::PageFrame},
     common::value::Value,
     storage::{
         btree::{
-            internal::InternalNode,
-            leaf::LeafNode,
-            node::{BPlusNode, Index, IndexKey, NodeId},
+            internal::DiskInternalNode,
+            leaf::DiskLeafNode,
+            node::{DiskBPlusNode, Index, IndexKey, NodeId},
         },
-        page::RowId,
+        page::{PageId, RowId},
     },
 };
 
-pub struct BPlusTree {
+pub struct DiskBPlusTree {
+    root: PageId,
     order: usize,
-    root: NodeId,
-    nodes: Vec<BPlusNode>,
+    bp: BufferPoolHandle,
 }
 
-impl BPlusTree {
-    pub fn new(order: usize) -> Self {
+impl DiskBPlusTree {
+    pub fn new(order: usize, bp: BufferPoolHandle) -> Self {
         assert!(order >= 3, "B+Tree order must be ≥ 3");
 
-        let root = LeafNode {
-            keys: Vec::new(),
-            values: Vec::new(),
-            next: None,
+        // Allocate root page
+        let root_pid = {
+            let mut pool = bp.lock().unwrap();
+            let pid = pool.pm.allocate_page();
+
+            // Initialize root as empty leaf
+            let root = DiskLeafNode {
+                keys: Vec::new(),
+                values: Vec::new(),
+                next: None,
+            };
+
+            let page = pool.fetch_page(pid);
+            Self::serialize_node(&DiskBPlusNode::Leaf(root), page);
+            pool.unpin_page(pid, true);
+
+            pid
         };
 
         Self {
+            root: root_pid,
             order,
-            root: 0,
-            nodes: vec![BPlusNode::Leaf(root)],
+            bp,
         }
     }
 
-    fn find_leaf(&self, key: &IndexKey) -> NodeId {
-        let mut node = self.root;
+    // Serialize node to page
+    fn serialize_node(node: &DiskBPlusNode, page: &mut PageFrame) {
+        let data = &mut page.data;
+        data.fill(0);
+
+        let mut out = Vec::new();
+
+        match node {
+            DiskBPlusNode::Leaf(leaf) => {
+                out.push(0); // leaf tag
+                out.extend_from_slice(&(leaf.keys.len() as u16).to_le_bytes());
+
+                let next = leaf.next.map(|p| p.0).unwrap_or(u64::MAX);
+                out.extend_from_slice(&next.to_le_bytes());
+
+                for (k, rids) in leaf.keys.iter().zip(&leaf.values) {
+                    k.serialize(&mut out);
+
+                    out.extend_from_slice(&(rids.len() as u16).to_le_bytes());
+                    for rid in rids {
+                        out.extend_from_slice(&rid.page_id.0.to_le_bytes());
+                        out.extend_from_slice(&rid.slot_id.to_le_bytes());
+                    }
+                }
+            }
+
+            DiskBPlusNode::Internal(internal) => {
+                out.push(1); // internal tag
+                out.extend_from_slice(&(internal.keys.len() as u16).to_le_bytes());
+
+                for child in &internal.children {
+                    out.extend_from_slice(&child.0.to_le_bytes());
+                }
+
+                for k in &internal.keys {
+                    k.serialize(&mut out);
+                }
+            }
+        }
+
+        assert!(out.len() <= data.len());
+        data[..out.len()].copy_from_slice(&out);
+    }
+    // Deserialize node from page
+    fn deserialize_node(page: &PageFrame) -> DiskBPlusNode {
+        let mut input = &page.data[..];
+
+        let tag = input[0];
+        input = &input[1..];
+
+        let key_count = u16::from_le_bytes(input[..2].try_into().unwrap()) as usize;
+        input = &input[2..];
+
+        match tag {
+            0 => {
+                let next_raw = u64::from_le_bytes(input[..8].try_into().unwrap());
+                input = &input[8..];
+
+                let next = if next_raw == u64::MAX {
+                    None
+                } else {
+                    Some(PageId(next_raw))
+                };
+
+                let mut keys = Vec::with_capacity(key_count);
+                let mut values = Vec::with_capacity(key_count);
+
+                for _ in 0..key_count {
+                    let key = IndexKey::deserialize(&mut input);
+                    let rid_count = u16::from_le_bytes(input[..2].try_into().unwrap()) as usize;
+                    input = &input[2..];
+
+                    let mut rids = Vec::with_capacity(rid_count);
+                    for _ in 0..rid_count {
+                        let pid = u64::from_le_bytes(input[..8].try_into().unwrap());
+                        let sid = u16::from_le_bytes(input[8..10].try_into().unwrap());
+                        input = &input[10..];
+
+                        rids.push(RowId {
+                            page_id: PageId(pid),
+                            slot_id: sid,
+                        });
+                    }
+
+                    keys.push(key);
+                    values.push(rids);
+                }
+
+                DiskBPlusNode::Leaf(DiskLeafNode { keys, values, next })
+            }
+
+            1 => {
+                let mut children = Vec::with_capacity(key_count + 1);
+                for _ in 0..key_count + 1 {
+                    let pid = u64::from_le_bytes(input[..8].try_into().unwrap());
+                    input = &input[8..];
+                    children.push(PageId(pid));
+                }
+
+                let mut keys = Vec::with_capacity(key_count);
+                for _ in 0..key_count {
+                    keys.push(IndexKey::deserialize(&mut input));
+                }
+
+                DiskBPlusNode::Internal(DiskInternalNode { keys, children })
+            }
+
+            _ => panic!("invalid B+Tree node tag"),
+        }
+    }
+
+    fn find_leaf(&self, key: &IndexKey) -> PageId {
+        let mut node_pid = self.root;
 
         loop {
-            match &self.nodes[node] {
-                BPlusNode::Leaf(_) => return node,
-                BPlusNode::Internal(internal) => {
+            let mut pool = self.bp.lock().unwrap();
+            let page = pool.fetch_page(node_pid);
+            let node = Self::deserialize_node(page);
+            pool.unpin_page(node_pid, false);
+
+            match node {
+                DiskBPlusNode::Leaf(_) => return node_pid,
+                DiskBPlusNode::Internal(internal) => {
                     let idx = match internal.keys.binary_search(key) {
                         Ok(i) => i + 1,
                         Err(i) => i,
                     };
-                    node = internal.children[idx];
+                    node_pid = internal.children[idx];
                 }
             }
         }
     }
 
     pub fn insert(&mut self, key: IndexKey, rid: RowId) {
-        if let Some((sep, right)) = self.insert_recursive(self.root, key, rid) {
-            // Root split → grow tree height
-            let new_root = InternalNode {
-                keys: vec![sep],
-                children: vec![self.root, right],
-            };
+        if let Some((sep, new_child)) = self.insert_recursive(self.root, key, rid) {
+            // Root split
+            let mut bp = self.bp.lock().unwrap();
+            let new_root = bp.pm.allocate_page();
+            drop(bp);
 
-            self.root = self.nodes.len();
-            self.nodes.push(BPlusNode::Internal(new_root));
+            let root = DiskBPlusNode::Internal(DiskInternalNode {
+                keys: vec![sep],
+                children: vec![self.root, new_child],
+            });
+
+            self.write_node(new_root, &root);
+            self.root = new_root;
         }
     }
 
-    pub fn delete(&mut self, key: &IndexKey, rid: RowId) {
-        self.delete_recursive(self.root, key, rid);
+    fn insert_recursive(
+        &mut self,
+        node_id: PageId,
+        key: IndexKey,
+        rid: RowId,
+    ) -> Option<(IndexKey, PageId)> {
+        let mut node = self.load_node(node_id);
 
-        // Normalize root fully
-        loop {
-            let collapse = match &self.nodes[self.root] {
-                BPlusNode::Internal(i) if i.keys.is_empty() => Some(i.children[0]),
-                _ => None,
-            };
+        match &mut node {
+            // ---------------- LEAF ----------------
+            DiskBPlusNode::Leaf(leaf) => {
+                match leaf.keys.binary_search(&key) {
+                    Ok(i) => leaf.values[i].push(rid),
+                    Err(i) => {
+                        leaf.keys.insert(i, key);
+                        leaf.values.insert(i, vec![rid]);
+                    }
+                }
 
-            if let Some(new_root) = collapse {
-                self.root = new_root;
-            } else {
-                break;
+                if leaf.keys.len() <= self.max_leaf_keys() {
+                    self.write_node(node_id, &node);
+                    return None;
+                }
+
+                // ---- split leaf ----
+                let mid = leaf.keys.len() / 2;
+
+                let right_keys = leaf.keys.split_off(mid);
+                let right_vals = leaf.values.split_off(mid);
+                let sep = right_keys[0].clone();
+
+                let mut bp = self.bp.lock().unwrap();
+                let right_id = bp.pm.allocate_page();
+                drop(bp);
+
+                let right = DiskBPlusNode::Leaf(DiskLeafNode {
+                    keys: right_keys,
+                    values: right_vals,
+                    next: leaf.next,
+                });
+
+                leaf.next = Some(right_id);
+
+                self.write_node(node_id, &node);
+                self.write_node(right_id, &right);
+
+                return Some((sep, right_id));
+            }
+
+            // ---------------- INTERNAL ----------------
+            DiskBPlusNode::Internal(internal) => {
+                let idx = match internal.keys.binary_search(&key) {
+                    Ok(i) => i + 1,
+                    Err(i) => i,
+                };
+
+                let child = internal.children[idx];
+
+                if let Some((sep, new_child)) = self.insert_recursive(child, key, rid) {
+                    internal.keys.insert(idx, sep);
+                    internal.children.insert(idx + 1, new_child);
+                } else {
+                    self.write_node(node_id, &node);
+                    return None;
+                }
+
+                if internal.keys.len() <= self.max_internal_keys() {
+                    self.write_node(node_id, &node);
+                    return None;
+                }
+
+                // ---- split internal ----
+                let mid = internal.keys.len() / 2;
+                let sep = internal.keys[mid].clone();
+
+                let right_keys = internal.keys.split_off(mid + 1);
+                let right_children = internal.children.split_off(mid + 1);
+
+                internal.keys.pop(); // remove sep
+
+                let mut bp = self.bp.lock().unwrap();
+                let right_id = bp.pm.allocate_page();
+                drop(bp);
+
+                let right = DiskBPlusNode::Internal(DiskInternalNode {
+                    keys: right_keys,
+                    children: right_children,
+                });
+
+                self.write_node(node_id, &node);
+                self.write_node(right_id, &right);
+
+                return Some((sep, right_id));
             }
         }
-
-        #[cfg(debug_assertions)]
-        self.assert_invariants();
     }
 
-    fn insert_into_leaf(&mut self, leaf_id: NodeId, key: IndexKey, rid: RowId) {
-        let leaf = match &mut self.nodes[leaf_id] {
-            BPlusNode::Leaf(l) => l,
+    fn split_leaf(&mut self, leaf_pid: PageId) -> (IndexKey, PageId) {
+        let mut pool = self.bp.lock().unwrap();
+
+        let page = pool.fetch_page(leaf_pid);
+        let mut node = Self::deserialize_node(page);
+        pool.unpin_page(leaf_pid, false);
+
+        let leaf = match &mut node {
+            DiskBPlusNode::Leaf(l) => l,
             _ => unreachable!(),
         };
 
-        match leaf.keys.binary_search(&key) {
-            Ok(i) => leaf.values[i].push(rid),
-            Err(i) => {
-                leaf.keys.insert(i, key);
-                leaf.values.insert(i, vec![rid]);
-            }
-        }
+        let split_at = leaf.keys.len() / 2;
+
+        let new_keys = leaf.keys.split_off(split_at);
+        let new_values = leaf.values.split_off(split_at);
+        let separator = new_keys[0].clone();
+
+        let new_leaf_pid = pool.pm.allocate_page();
+
+        let new_leaf = DiskLeafNode {
+            keys: new_keys,
+            values: new_values,
+            next: leaf.next.take(),
+        };
+
+        leaf.next = Some(new_leaf_pid);
+
+        // Write original leaf
+        let page = pool.fetch_page(leaf_pid);
+        Self::serialize_node(&node, page);
+        pool.unpin_page(leaf_pid, true);
+
+        // Write new leaf
+        let page = pool.fetch_page(new_leaf_pid);
+        Self::serialize_node(&DiskBPlusNode::Leaf(new_leaf), page);
+        pool.unpin_page(new_leaf_pid, true);
+
+        drop(pool);
+
+        (separator, new_leaf_pid)
     }
 
-    fn leaf_overflow(&self, leaf_id: NodeId) -> bool {
-        match &self.nodes[leaf_id] {
-            BPlusNode::Leaf(l) => l.keys.len() > self.max_keys(),
-            _ => false,
-        }
+    fn split_internal(&mut self, node_pid: PageId) -> (IndexKey, PageId) {
+        let mut pool = self.bp.lock().unwrap();
+
+        let page = pool.fetch_page(node_pid);
+        let mut node = Self::deserialize_node(page);
+        pool.unpin_page(node_pid, false);
+
+        let internal = match &mut node {
+            DiskBPlusNode::Internal(i) => i,
+            _ => unreachable!(),
+        };
+
+        let mid = internal.keys.len() / 2;
+        let separator = internal.keys.remove(mid);
+
+        let right_keys = internal.keys.split_off(mid);
+        let right_children = internal.children.split_off(mid + 1);
+
+        let new_internal_pid = pool.pm.allocate_page();
+
+        let new_internal = DiskInternalNode {
+            keys: right_keys,
+            children: right_children,
+        };
+
+        // Write original internal
+        let page = pool.fetch_page(node_pid);
+        Self::serialize_node(&node, page);
+        pool.unpin_page(node_pid, true);
+
+        // Write new internal
+        let page = pool.fetch_page(new_internal_pid);
+        Self::serialize_node(&DiskBPlusNode::Internal(new_internal), page);
+        pool.unpin_page(new_internal_pid, true);
+
+        drop(pool);
+
+        (separator, new_internal_pid)
     }
 
     pub fn get(&self, key: &IndexKey) -> Vec<RowId> {
-        let leaf_id = self.find_leaf(key);
+        let leaf_pid = self.find_leaf(key);
 
-        match &self.nodes[leaf_id] {
-            BPlusNode::Leaf(l) => match l.keys.binary_search(key) {
-                Ok(i) => l.values[i].clone(),
+        let mut pool = self.bp.lock().unwrap();
+        let page = pool.fetch_page(leaf_pid);
+        let node = Self::deserialize_node(page);
+        pool.unpin_page(leaf_pid, false);
+
+        match node {
+            DiskBPlusNode::Leaf(leaf) => match leaf.keys.binary_search(key) {
+                Ok(i) => leaf.values[i].clone(),
                 Err(_) => Vec::new(),
             },
             _ => unreachable!(),
@@ -125,11 +402,17 @@ impl BPlusTree {
 
     pub fn range(&self, from: &IndexKey, to: &IndexKey) -> Vec<RowId> {
         let mut out = Vec::new();
-        let mut node = self.find_leaf(from);
+        let mut node_pid = self.find_leaf(from);
 
         loop {
-            let leaf = match &self.nodes[node] {
-                BPlusNode::Leaf(l) => l,
+            let mut pool = self.bp.lock().unwrap();
+            let page = pool.fetch_page(node_pid);
+            let node = Self::deserialize_node(page);
+            pool.unpin_page(node_pid, false);
+            drop(pool);
+
+            let leaf = match node {
+                DiskBPlusNode::Leaf(l) => l,
                 _ => unreachable!(),
             };
 
@@ -143,7 +426,7 @@ impl BPlusTree {
             }
 
             match leaf.next {
-                Some(next) => node = next,
+                Some(next_pid) => node_pid = next_pid,
                 None => break,
             }
         }
@@ -151,544 +434,284 @@ impl BPlusTree {
         out
     }
 
-    fn insert_recursive(
-        &mut self,
-        node_id: NodeId,
-        key: IndexKey,
-        rid: RowId,
-    ) -> Option<(IndexKey, NodeId)> {
-        match &mut self.nodes[node_id] {
-            BPlusNode::Leaf(_) => {
-                self.insert_into_leaf(node_id, key, rid);
+    pub fn delete(&mut self, key: &IndexKey, rid: RowId) {
+        let underflow = self.delete_recursive(self.root, key, rid);
 
-                if self.leaf_overflow(node_id) {
-                    Some(self.split_leaf(node_id))
-                } else {
-                    None
+        if underflow {
+            let root_node = self.load_node(self.root);
+            if let DiskBPlusNode::Internal(internal) = root_node {
+                if internal.children.len() == 1 {
+                    self.root = internal.children[0];
                 }
             }
+        }
+    }
 
-            BPlusNode::Internal(internal) => {
-                let idx = match internal.keys.binary_search(&key) {
+    fn delete_recursive(&mut self, node_id: PageId, key: &IndexKey, rid: RowId) -> bool {
+        let mut node = self.load_node(node_id);
+
+        match &mut node {
+            DiskBPlusNode::Leaf(leaf) => {
+                if let Ok(i) = leaf.keys.binary_search(key) {
+                    leaf.values[i].retain(|r| *r != rid);
+                    if leaf.values[i].is_empty() {
+                        leaf.keys.remove(i);
+                        leaf.values.remove(i);
+                    }
+                }
+
+                let underflow = leaf.keys.len() < self.min_leaf_keys();
+                self.write_node(node_id, &node);
+                return underflow;
+            }
+
+            DiskBPlusNode::Internal(internal) => {
+                let idx = match internal.keys.binary_search(key) {
                     Ok(i) => i + 1,
                     Err(i) => i,
                 };
 
                 let child = internal.children[idx];
 
-                if let Some((sep, new_child)) = self.insert_recursive(child, key, rid) {
-                    self.insert_into_internal(node_id, sep, new_child);
+                // Drop the node to release the borrow before recursive call
+                drop(node);
 
-                    if self.internal_overflow(node_id) {
-                        Some(self.split_internal(node_id))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-        }
-    }
+                let child_underflow = self.delete_recursive(child, key, rid);
 
-    fn delete_recursive(&mut self, node_id: NodeId, key: &IndexKey, rid: RowId) -> bool {
-        match &mut self.nodes[node_id] {
-            BPlusNode::Leaf(l) => {
-                if let Ok(i) = l.keys.binary_search(key) {
-                    l.values[i].retain(|r| *r != rid);
-                    if l.values[i].is_empty() {
-                        l.keys.remove(i);
-                        l.values.remove(i);
-                    }
-                }
-                l.keys.len() < self.min_keys()
-            }
-
-            BPlusNode::Internal(i) => {
-                let idx = match i.keys.binary_search(key) {
-                    Ok(j) => j + 1,
-                    Err(j) => j,
-                };
-
-                let child_id = i.children[idx];
-
-                let underflow = self.delete_recursive(child_id, key, rid);
-
-                if underflow {
-                    self.rebalance_child(node_id, idx);
+                if child_underflow {
+                    self.rebalance_internal(node_id, idx);
                 }
 
-                let i = match &self.nodes[node_id] {
-                    BPlusNode::Internal(i) => i,
+                // Reload the node after potential rebalancing
+                let node = self.load_node(node_id);
+                let underflow = match &node {
+                    DiskBPlusNode::Internal(i) => i.keys.len() < self.min_internal_keys(),
                     _ => unreachable!(),
                 };
 
-                i.keys.len() < self.min_keys()
+                // No need to write back - rebalance_internal already did it
+                underflow
             }
         }
     }
 
-    fn node_key_count(&self, id: NodeId) -> usize {
-        match &self.nodes[id] {
-            BPlusNode::Leaf(l) => l.keys.len(),
-            BPlusNode::Internal(i) => i.keys.len(),
-        }
-    }
+    fn borrow_from_left(&mut self, parent_id: PageId, idx: usize) {
+        let parent = self.load_node(parent_id);
 
-    fn rebalance_child(&mut self, parent: NodeId, idx: usize) {
-        let child_id = {
-            let p = match &self.nodes[parent] {
-                BPlusNode::Internal(p) => p,
-                _ => unreachable!(),
-            };
-            p.children[idx]
+        let (left_id, cur_id) = match &parent {
+            DiskBPlusNode::Internal(i) => (i.children[idx - 1], i.children[idx]),
+            _ => unreachable!(),
         };
 
-        match &self.nodes[child_id] {
-            BPlusNode::Leaf(_) => {
-                self.rebalance_leaf(parent, idx);
-            }
-            BPlusNode::Internal(_) => {
-                self.rebalance_internal_node(parent, idx);
-            }
-        }
-    }
+        let mut left = self.load_node(left_id);
+        let mut cur = self.load_node(cur_id);
+        let mut parent = parent; // Make parent mutable
 
-    fn rebalance_leaf(&mut self, parent: NodeId, idx: usize) {
-        let min_keys = self.min_keys();
-
-        let (left_idx, right_idx, sep_left, sep_right, leaf_id) = {
-            let p = match &self.nodes[parent] {
-                BPlusNode::Internal(p) => p,
-                _ => unreachable!(),
-            };
+        match (&mut parent, &mut left, &mut cur) {
+            (DiskBPlusNode::Internal(p), DiskBPlusNode::Leaf(l), DiskBPlusNode::Leaf(c)) => {
+                c.keys.insert(0, l.keys.pop().unwrap());
+                c.values.insert(0, l.values.pop().unwrap());
+                p.keys[idx - 1] = c.keys[0].clone();
+            }
 
             (
-                if idx > 0 { Some(idx - 1) } else { None },
-                if idx + 1 < p.children.len() {
-                    Some(idx + 1)
-                } else {
-                    None
-                },
-                if idx > 0 { Some(idx - 1) } else { None },
-                if idx + 1 < p.children.len() {
-                    Some(idx)
-                } else {
-                    None
-                },
-                p.children[idx],
-            )
-        };
-
-        // Try borrow from LEFT leaf
-        if let (Some(lidx), Some(sep_idx)) = (left_idx, sep_left) {
-            let left_id = {
-                let p = match &self.nodes[parent] {
-                    BPlusNode::Internal(p) => p,
-                    _ => unreachable!(),
-                };
-                p.children[lidx]
-            };
-
-            if self.node_key_count(left_id) > min_keys {
-                let (left, leaf) = if left_id < leaf_id {
-                    let (l, r) = self.nodes.split_at_mut(leaf_id);
-                    (&mut l[left_id], &mut r[0])
-                } else {
-                    let (l, r) = self.nodes.split_at_mut(left_id);
-                    (&mut r[0], &mut l[leaf_id])
-                };
-
-                let (left, leaf) = match (left, leaf) {
-                    (BPlusNode::Leaf(l), BPlusNode::Leaf(c)) => (l, c),
-                    _ => unreachable!(),
-                };
-
-                leaf.keys.insert(0, left.keys.pop().unwrap());
-                leaf.values.insert(0, left.values.pop().unwrap());
-
-                // Separator must be the min key of the RIGHT child (which is leaf after borrow)
-                let new_sep = leaf.keys[0].clone();
-
-                let p = match &mut self.nodes[parent] {
-                    BPlusNode::Internal(p) => p,
-                    _ => unreachable!(),
-                };
-                p.keys[sep_idx] = new_sep;
-
-                return;
+                DiskBPlusNode::Internal(p),
+                DiskBPlusNode::Internal(l),
+                DiskBPlusNode::Internal(c),
+            ) => {
+                c.keys.insert(0, p.keys[idx - 1].clone());
+                p.keys[idx - 1] = l.keys.pop().unwrap();
+                c.children.insert(0, l.children.pop().unwrap());
             }
+
+            _ => unreachable!(),
         }
 
-        // Try borrow from RIGHT leaf
-        if let (Some(ridx), Some(sep_idx)) = (right_idx, sep_right) {
-            let right_id = {
-                let p = match &self.nodes[parent] {
-                    BPlusNode::Internal(p) => p,
-                    _ => unreachable!(),
-                };
-                p.children[ridx]
-            };
-
-            if self.node_key_count(right_id) > min_keys {
-                let (leaf, right) = if leaf_id < right_id {
-                    let (l, r) = self.nodes.split_at_mut(right_id);
-                    (&mut l[leaf_id], &mut r[0])
-                } else {
-                    let (l, r) = self.nodes.split_at_mut(leaf_id);
-                    (&mut r[0], &mut l[right_id])
-                };
-
-                let (leaf, right) = match (leaf, right) {
-                    (BPlusNode::Leaf(c), BPlusNode::Leaf(r)) => (c, r),
-                    _ => unreachable!(),
-                };
-
-                leaf.keys.push(right.keys.remove(0));
-                leaf.values.push(right.values.remove(0));
-
-                // Separator must be the min key of the RIGHT child (which is right after borrow)
-                let new_sep = right.keys[0].clone();
-
-                let p = match &mut self.nodes[parent] {
-                    BPlusNode::Internal(p) => p,
-                    _ => unreachable!(),
-                };
-
-                p.keys[sep_idx] = new_sep;
-                return;
-            }
-        }
-
-        // Must MERGE
-        let (left, right, sep_idx) = if let Some(lidx) = left_idx {
-            (lidx, idx, lidx)
-        } else {
-            (idx, idx + 1, idx)
-        };
-
-        let (left_id, right_id) = {
-            let p = match &self.nodes[parent] {
-                BPlusNode::Internal(p) => p,
-                _ => unreachable!(),
-            };
-            (p.children[left], p.children[right])
-        };
-
-        let (left_leaf, right_leaf) = if left_id < right_id {
-            let (l, r) = self.nodes.split_at_mut(right_id);
-            (&mut l[left_id], &mut r[0])
-        } else {
-            let (l, r) = self.nodes.split_at_mut(left_id);
-            (&mut r[0], &mut l[right_id])
-        };
-
-        let (left_leaf, right_leaf) = match (left_leaf, right_leaf) {
-            (BPlusNode::Leaf(l), BPlusNode::Leaf(r)) => (l, r),
-            _ => unreachable!(),
-        };
-
-        left_leaf.keys.extend(right_leaf.keys.drain(..));
-        left_leaf.values.extend(right_leaf.values.drain(..));
-        left_leaf.next = right_leaf.next.take();
-
-        let p = match &mut self.nodes[parent] {
-            BPlusNode::Internal(p) => p,
-            _ => unreachable!(),
-        };
-        p.keys.remove(sep_idx);
-        p.children.remove(right);
+        self.write_node(left_id, &left);
+        self.write_node(cur_id, &cur);
+        self.write_node(parent_id, &parent);
     }
 
-    fn rebalance_internal_node(&mut self, parent: NodeId, idx: usize) {
-        let (left_idx, right_idx) = {
-            let parent_node = match &self.nodes[parent] {
-                BPlusNode::Internal(p) => p,
+    fn borrow_from_right(&mut self, parent_id: PageId, idx: usize) {
+        let parent = self.load_node(parent_id);
+
+        let (cur_id, right_id) = match &parent {
+            DiskBPlusNode::Internal(i) => (i.children[idx], i.children[idx + 1]),
+            _ => unreachable!(),
+        };
+
+        let mut cur = self.load_node(cur_id);
+        let mut right = self.load_node(right_id);
+        let mut parent = parent; // Make parent mutable
+
+        match (&mut parent, &mut cur, &mut right) {
+            (DiskBPlusNode::Internal(p), DiskBPlusNode::Leaf(c), DiskBPlusNode::Leaf(r)) => {
+                c.keys.push(r.keys.remove(0));
+                c.values.push(r.values.remove(0));
+                p.keys[idx] = r.keys[0].clone();
+            }
+
+            (
+                DiskBPlusNode::Internal(p),
+                DiskBPlusNode::Internal(c),
+                DiskBPlusNode::Internal(r),
+            ) => {
+                c.keys.push(p.keys[idx].clone());
+                p.keys[idx] = r.keys.remove(0);
+                c.children.push(r.children.remove(0));
+            }
+
+            _ => unreachable!(),
+        }
+
+        self.write_node(cur_id, &cur);
+        self.write_node(right_id, &right);
+        self.write_node(parent_id, &parent);
+    }
+
+    fn merge_children(&mut self, parent_id: PageId, idx: usize) {
+        let mut parent = self.load_node(parent_id);
+
+        let (left_id, right_id, sep) = match &mut parent {
+            DiskBPlusNode::Internal(i) => {
+                let left_id = i.children[idx];
+                let right_id = i.children[idx + 1];
+                let sep = i.keys.remove(idx);
+                i.children.remove(idx + 1);
+                (left_id, right_id, sep)
+            }
+            _ => unreachable!(),
+        };
+
+        let mut left = self.load_node(left_id);
+        let right = self.load_node(right_id);
+
+        match (&mut left, right) {
+            (DiskBPlusNode::Leaf(l), DiskBPlusNode::Leaf(r)) => {
+                l.keys.extend(r.keys);
+                l.values.extend(r.values);
+                l.next = r.next;
+            }
+
+            (DiskBPlusNode::Internal(l), DiskBPlusNode::Internal(r)) => {
+                l.keys.push(sep);
+                l.keys.extend(r.keys);
+                l.children.extend(r.children);
+            }
+
+            _ => unreachable!(),
+        }
+
+        self.write_node(left_id, &left);
+        self.write_node(parent_id, &parent);
+    }
+
+    fn rebalance_internal(&mut self, parent_id: PageId, child_idx: usize) {
+        let parent = self.load_node(parent_id);
+
+        let (children_len, child_id) = match &parent {
+            DiskBPlusNode::Internal(i) => (i.children.len(), i.children[child_idx]),
+            _ => unreachable!(),
+        };
+
+        // Try borrow from left
+        if child_idx > 0 {
+            let left_id = match &parent {
+                DiskBPlusNode::Internal(i) => i.children[child_idx - 1],
                 _ => unreachable!(),
             };
 
-            let left_idx = if idx > 0 { Some(idx - 1) } else { None };
-            let right_idx = if idx + 1 < parent_node.children.len() {
-                Some(idx + 1)
-            } else {
-                None
-            };
-
-            (left_idx, right_idx)
-        };
-
-        // Try borrow from LEFT
-        if let Some(lidx) = left_idx {
-            let left_id = {
-                let parent_node = match &self.nodes[parent] {
-                    BPlusNode::Internal(p) => p,
-                    _ => unreachable!(),
-                };
-                parent_node.children[lidx]
-            };
-
-            if self.node_key_count(left_id) > self.min_keys() {
-                self.borrow_from_left(parent, lidx, idx);
+            if self.can_lend(left_id) {
+                self.borrow_from_left(parent_id, child_idx);
                 return;
             }
         }
 
-        // Try borrow from RIGHT
-        if let Some(ridx) = right_idx {
-            let right_id = {
-                let parent_node = match &self.nodes[parent] {
-                    BPlusNode::Internal(p) => p,
-                    _ => unreachable!(),
-                };
-                parent_node.children[ridx]
+        // Try borrow from right
+        if child_idx + 1 < children_len {
+            let right_id = match &parent {
+                DiskBPlusNode::Internal(i) => i.children[child_idx + 1],
+                _ => unreachable!(),
             };
 
-            if self.node_key_count(right_id) > self.min_keys() {
-                self.borrow_from_right(parent, idx, ridx);
+            if self.can_lend(right_id) {
+                self.borrow_from_right(parent_id, child_idx);
                 return;
             }
         }
 
         // Must merge
-        let (left, right, sep_idx) = if idx > 0 {
-            (idx - 1, idx, idx - 1)
+        if child_idx > 0 {
+            self.merge_children(parent_id, child_idx - 1);
         } else {
-            (idx, idx + 1, idx)
-        };
-
-        let (left_id, right_id) = {
-            let parent_node = match &self.nodes[parent] {
-                BPlusNode::Internal(p) => p,
-                _ => unreachable!(),
-            };
-            (parent_node.children[left], parent_node.children[right])
-        };
-
-        self.merge_nodes(parent, left, right, sep_idx, left_id, right_id);
+            self.merge_children(parent_id, child_idx);
+        }
     }
-
-    fn borrow_from_left(&mut self, parent: NodeId, left_idx: usize, child_idx: usize) {
-        let sep_idx = left_idx;
-
-        let sep = {
-            let p = match &mut self.nodes[parent] {
-                BPlusNode::Internal(p) => p,
-                _ => unreachable!(),
-            };
-            p.keys[sep_idx].clone()
-        };
-
-        let (left_id, child_id) = {
-            let p = match &self.nodes[parent] {
-                BPlusNode::Internal(p) => p,
-                _ => unreachable!(),
-            };
-            (p.children[left_idx], p.children[child_idx])
-        };
-
-        let (left, child) = if left_id < child_id {
-            let (l, r) = self.nodes.split_at_mut(child_id);
-            (&mut l[left_id], &mut r[0])
-        } else {
-            let (l, r) = self.nodes.split_at_mut(left_id);
-            (&mut r[0], &mut l[child_id])
-        };
-
-        match (left, child) {
-            (BPlusNode::Internal(l), BPlusNode::Internal(c)) => {
-                // Move separator down to child
-                c.keys.insert(0, sep);
-
-                // Move last key from left up as new separator
-                let new_sep = l.keys.pop().unwrap();
-
-                // Move last child pointer from left to child
-                let child_ptr = l.children.pop().unwrap();
-                c.children.insert(0, child_ptr);
-
-                let p = match &mut self.nodes[parent] {
-                    BPlusNode::Internal(p) => p,
-                    _ => unreachable!(),
-                };
-                p.keys[sep_idx] = new_sep;
-            }
-            _ => unreachable!(),
+    fn can_lend(&self, node_id: PageId) -> bool {
+        match self.load_node(node_id) {
+            DiskBPlusNode::Leaf(l) => l.keys.len() > self.min_leaf_keys(),
+            DiskBPlusNode::Internal(i) => i.keys.len() > self.min_internal_keys(),
         }
     }
 
-    fn borrow_from_right(&mut self, parent: NodeId, child_idx: usize, right_idx: usize) {
-        let sep_idx = child_idx;
+    fn load_node(&self, pid: PageId) -> DiskBPlusNode {
+        let mut bp = self.bp.lock().unwrap();
+        let frame = bp.fetch_page(pid);
+        let node = Self::deserialize_node(frame);
+        bp.unpin_page(pid, false);
+        node
+    }
 
-        let sep = {
-            let p = match &mut self.nodes[parent] {
-                BPlusNode::Internal(p) => p,
-                _ => unreachable!(),
-            };
-            p.keys[sep_idx].clone()
-        };
+    fn write_node(&self, pid: PageId, node: &DiskBPlusNode) {
+        let mut bp = self.bp.lock().unwrap();
+        let frame = bp.fetch_page(pid);
+        Self::serialize_node(node, frame);
+        bp.unpin_page(pid, true);
+    }
 
-        let (child_id, right_id) = {
-            let p = match &self.nodes[parent] {
-                BPlusNode::Internal(p) => p,
-                _ => unreachable!(),
-            };
-            (p.children[child_idx], p.children[right_idx])
-        };
+    pub fn search(&self, key: &IndexKey) -> Vec<RowId> {
+        let mut current = self.root;
 
-        let (child, right) = if child_id < right_id {
-            let (l, r) = self.nodes.split_at_mut(right_id);
-            (&mut l[child_id], &mut r[0])
-        } else {
-            let (l, r) = self.nodes.split_at_mut(child_id);
-            (&mut r[0], &mut l[right_id])
-        };
+        loop {
+            let node = self.load_node(current);
 
-        match (child, right) {
-            (BPlusNode::Internal(c), BPlusNode::Internal(r)) => {
-                // Move separator down to child
-                c.keys.push(sep);
+            match node {
+                DiskBPlusNode::Leaf(leaf) => {
+                    return match leaf.keys.binary_search(key) {
+                        Ok(i) => leaf.values[i].clone(),
+                        Err(_) => Vec::new(),
+                    };
+                }
 
-                // Move first key from right up as new separator
-                let new_sep = r.keys.remove(0);
-
-                // Move first child pointer from right to child
-                let child_ptr = r.children.remove(0);
-                c.children.push(child_ptr);
-
-                let p = match &mut self.nodes[parent] {
-                    BPlusNode::Internal(p) => p,
-                    _ => unreachable!(),
-                };
-                p.keys[sep_idx] = new_sep;
+                DiskBPlusNode::Internal(internal) => {
+                    let idx = match internal.keys.binary_search(key) {
+                        Ok(i) => i + 1,
+                        Err(i) => i,
+                    };
+                    current = internal.children[idx];
+                }
             }
-            _ => unreachable!(),
         }
     }
 
-    fn merge_nodes(
-        &mut self,
-        parent: NodeId,
-        _left_idx: usize,
-        right_idx: usize,
-        sep_idx: usize,
-        left_id: NodeId,
-        right_id: NodeId,
-    ) {
-        let sep = {
-            let parent_node = match &mut self.nodes[parent] {
-                BPlusNode::Internal(p) => p,
-                _ => unreachable!(),
-            };
-            parent_node.keys.remove(sep_idx)
-        };
-
-        let (left_node, right_node) = if left_id < right_id {
-            let (l, r) = self.nodes.split_at_mut(right_id);
-            (&mut l[left_id], &mut r[0])
-        } else {
-            let (l, r) = self.nodes.split_at_mut(left_id);
-            (&mut r[0], &mut l[right_id])
-        };
-
-        match (left_node, right_node) {
-            (BPlusNode::Leaf(l), BPlusNode::Leaf(r)) => {
-                l.keys.extend(r.keys.drain(..));
-                l.values.extend(r.values.drain(..));
-                l.next = r.next.take();
-            }
-
-            (BPlusNode::Internal(l), BPlusNode::Internal(r)) => {
-                l.keys.push(sep);
-                l.keys.extend(r.keys.drain(..));
-                l.children.extend(r.children.drain(..));
-            }
-
-            _ => unreachable!(),
-        }
-
-        let parent_node = match &mut self.nodes[parent] {
-            BPlusNode::Internal(p) => p,
-            _ => unreachable!(),
-        };
-
-        parent_node.children.remove(right_idx);
+    fn min_leaf_keys(&self) -> usize {
+        // ceil(order / 2)
+        (self.order + 1) / 2
     }
 
-    fn insert_into_internal(&mut self, node_id: NodeId, key: IndexKey, right_child: NodeId) {
-        let internal = match &mut self.nodes[node_id] {
-            BPlusNode::Internal(i) => i,
-            _ => unreachable!(),
-        };
-
-        let idx = match internal.keys.binary_search(&key) {
-            Ok(i) => i + 1,
-            Err(i) => i,
-        };
-
-        internal.keys.insert(idx, key);
-        internal.children.insert(idx + 1, right_child);
+    fn min_internal_keys(&self) -> usize {
+        // ceil(order / 2) - 1
+        (self.order + 1) / 2 - 1
     }
 
-    fn internal_overflow(&self, node_id: NodeId) -> bool {
-        matches!(
-            &self.nodes[node_id],
-            BPlusNode::Internal(i) if i.keys.len() > self.max_keys()
-        )
+    fn max_leaf_keys(&self) -> usize {
+        self.order
     }
 
-    fn split_leaf(&mut self, leaf_id: NodeId) -> (IndexKey, NodeId) {
-        let new_leaf_id = self.nodes.len();
-
-        let leaf = match &mut self.nodes[leaf_id] {
-            BPlusNode::Leaf(l) => l,
-            _ => unreachable!(),
-        };
-
-        let split_at = leaf.keys.len() / 2;
-
-        let new_keys = leaf.keys.split_off(split_at);
-        let new_values = leaf.values.split_off(split_at);
-
-        let separator = new_keys[0].clone();
-
-        let new_leaf = LeafNode {
-            keys: new_keys,
-            values: new_values,
-            next: leaf.next.take(),
-        };
-
-        leaf.next = Some(new_leaf_id);
-
-        self.nodes.push(BPlusNode::Leaf(new_leaf));
-        (separator, new_leaf_id)
+    fn max_internal_keys(&self) -> usize {
+        self.order - 1
     }
 
-    fn split_internal(&mut self, node_id: NodeId) -> (IndexKey, NodeId) {
-        let new_internal_id = self.nodes.len();
-
-        let internal = match &mut self.nodes[node_id] {
-            BPlusNode::Internal(i) => i,
-            _ => unreachable!(),
-        };
-
-        let mid = internal.keys.len() / 2;
-        let separator = internal.keys.remove(mid);
-
-        let right_keys = internal.keys.split_off(mid);
-        let right_children = internal.children.split_off(mid + 1);
-
-        let new_internal = InternalNode {
-            keys: right_keys,
-            children: right_children,
-        };
-
-        self.nodes.push(BPlusNode::Internal(new_internal));
-
-        (separator, new_internal_id)
-    }
-}
-
-impl BPlusTree {
     fn max_keys(&self) -> usize {
         self.order - 1
     }
@@ -696,90 +719,39 @@ impl BPlusTree {
     fn min_keys(&self) -> usize {
         (self.order - 1) / 2
     }
+
+    pub fn flush(&self) {
+        let mut pool = self.bp.lock().unwrap();
+        pool.flush_all();
+    }
 }
 
-impl Index for BPlusTree {
+impl Index for DiskBPlusTree {
     fn insert(&mut self, key: IndexKey, rid: RowId) {
-        BPlusTree::insert(self, key, rid);
+        DiskBPlusTree::insert(self, key, rid);
     }
 
     fn delete(&mut self, key: &IndexKey, rid: RowId) {
-        BPlusTree::delete(self, key, rid);
+        DiskBPlusTree::delete(self, key, rid);
     }
 
     fn get(&self, key: &IndexKey) -> Vec<RowId> {
-        BPlusTree::get(self, key)
+        DiskBPlusTree::get(self, key)
     }
 
     fn range(&self, from: &IndexKey, to: &IndexKey) -> Vec<RowId> {
-        BPlusTree::range(self, from, to)
-    }
-}
-
-#[cfg(debug_assertions)]
-impl BPlusTree {
-    fn assert_invariants(&self) {
-        assert!(self.order >= 3);
-
-        use std::collections::HashSet;
-        let mut visited = HashSet::new();
-
-        self.assert_node(self.root, &mut visited);
-    }
-
-    fn assert_node(&self, id: NodeId, visited: &mut std::collections::HashSet<NodeId>) {
-        if !visited.insert(id) {
-            return; // already checked
-        }
-
-        match &self.nodes[id] {
-            BPlusNode::Leaf(l) => {
-                // keys & values match
-                assert_eq!(l.keys.len(), l.values.len());
-
-                // sorted keys
-                assert!(l.keys.windows(2).all(|w| w[0] <= w[1]));
-
-                // size bound
-                assert!(l.keys.len() <= self.max_keys());
-
-                // next pointer validity (optional)
-                if let Some(next) = l.next {
-                    assert!(matches!(self.nodes[next], BPlusNode::Leaf(_)));
-                }
-            }
-
-            BPlusNode::Internal(i) => {
-                if id == self.root {
-                    // root special case
-                    if i.keys.is_empty() {
-                        assert_eq!(i.children.len(), 1);
-                    } else {
-                        assert_eq!(i.children.len(), i.keys.len() + 1);
-                    }
-                } else {
-                    assert_eq!(i.children.len(), i.keys.len() + 1);
-                    assert!(i.keys.len() >= self.min_keys());
-                }
-
-                // sorted keys
-                assert!(i.keys.windows(2).all(|w| w[0] < w[1]));
-
-                // size bound
-                assert!(i.keys.len() <= self.max_keys());
-
-                // recurse into children
-                for &child in &i.children {
-                    self.assert_node(child, visited);
-                }
-            }
-        }
+        DiskBPlusTree::range(self, from, to)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::page::PageId;
+    use std::sync::{Arc, Mutex};
+
+    use crate::{
+        buffer::buffer_pool::BufferPool,
+        storage::{page::PageId, page_manager::FilePageManager},
+    };
 
     use super::*;
 
@@ -792,7 +764,12 @@ mod tests {
 
     #[test]
     fn insert_and_get_single_key() {
-        let mut tree = BPlusTree::new(4);
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        let mut tree = DiskBPlusTree::new(4, bp);
 
         tree.insert(IndexKey::Int64(10), rid(1));
         tree.insert(IndexKey::Int64(10), rid(2));
@@ -805,7 +782,12 @@ mod tests {
 
     #[test]
     fn leaf_split_and_lookup() {
-        let mut tree = BPlusTree::new(3);
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        let mut tree = DiskBPlusTree::new(3, bp);
 
         for i in 0..10 {
             tree.insert(IndexKey::Int64(i), rid(i as u64));
@@ -819,7 +801,12 @@ mod tests {
 
     #[test]
     fn range_query_across_leaves() {
-        let mut tree = BPlusTree::new(3);
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        let mut tree = DiskBPlusTree::new(3, bp);
 
         for i in 0..20 {
             tree.insert(IndexKey::Int64(i), rid(i as u64));
@@ -833,7 +820,12 @@ mod tests {
 
     #[test]
     fn delete_and_rebalance() {
-        let mut tree = BPlusTree::new(3);
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        let mut tree = DiskBPlusTree::new(3, bp);
 
         for i in 0..10 {
             tree.insert(IndexKey::Int64(i), rid(i as u64));
@@ -850,7 +842,12 @@ mod tests {
 
     #[test]
     fn delete_all_and_reinsert() {
-        let mut tree = BPlusTree::new(3);
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        let mut tree = DiskBPlusTree::new(3, bp);
 
         for i in 0..20 {
             tree.insert(IndexKey::Int64(i), rid(i as u64));
@@ -872,8 +869,13 @@ mod tests {
     #[test]
     fn random_insert_delete_stress() {
         use rand::{rng, seq::SliceRandom};
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
 
-        let mut tree = BPlusTree::new(4);
+        let mut tree = DiskBPlusTree::new(4, bp);
+
         let mut keys: Vec<i64> = (0..200).collect();
 
         for k in &keys {
@@ -888,6 +890,122 @@ mod tests {
 
         for k in 0..200 {
             assert!(tree.get(&IndexKey::Int64(k)).is_empty());
+        }
+    }
+
+    #[test]
+    fn disk_btree_insert_lookup() {
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open("/tmp/btree.db").unwrap(),
+        ))));
+
+        let mut tree = DiskBPlusTree::new(4, bp.clone());
+
+        tree.insert(
+            IndexKey::Int64(10),
+            RowId {
+                page_id: PageId(1),
+                slot_id: 0,
+            },
+        );
+        tree.insert(
+            IndexKey::Int64(20),
+            RowId {
+                page_id: PageId(1),
+                slot_id: 1,
+            },
+        );
+
+        let r = tree.search(&IndexKey::Int64(10));
+        assert_eq!(r.len(), 1);
+    }
+
+    #[test]
+    fn disk_btree_basic() {
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open("/tmp/db.db").unwrap(),
+        ))));
+
+        let mut tree = DiskBPlusTree::new(4, bp);
+
+        tree.insert(
+            IndexKey::Int64(10),
+            RowId {
+                page_id: PageId(1),
+                slot_id: 1,
+            },
+        );
+        tree.insert(
+            IndexKey::Int64(20),
+            RowId {
+                page_id: PageId(1),
+                slot_id: 2,
+            },
+        );
+        tree.insert(
+            IndexKey::Int64(30),
+            RowId {
+                page_id: PageId(1),
+                slot_id: 3,
+            },
+        );
+
+        assert_eq!(tree.get(&IndexKey::Int64(20)).len(), 1);
+    }
+
+    #[test]
+    fn delete_rebalance_disk_tree() {
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open("/tmp/db.db").unwrap(),
+        ))));
+
+        let mut tree = DiskBPlusTree::new(4, bp);
+
+        for i in 0..20 {
+            tree.insert(
+                IndexKey::Int64(i),
+                RowId {
+                    page_id: PageId(1),
+                    slot_id: i as u16,
+                },
+            );
+        }
+
+        for i in 0..20 {
+            tree.delete(
+                &IndexKey::Int64(i),
+                RowId {
+                    page_id: PageId(1),
+                    slot_id: i as u16,
+                },
+            );
+        }
+
+        for i in 0..20 {
+            assert!(tree.search(&IndexKey::Int64(i)).is_empty());
+        }
+    }
+
+    #[test]
+    fn insert_split_disk_tree() {
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open("/tmp/db.db").unwrap(),
+        ))));
+
+        let mut tree = DiskBPlusTree::new(4, bp);
+
+        for i in 0..50 {
+            tree.insert(
+                IndexKey::Int64(i),
+                RowId {
+                    page_id: PageId(1),
+                    slot_id: i as u16,
+                },
+            );
+        }
+
+        for i in 0..50 {
+            assert!(!tree.search(&IndexKey::Int64(i)).is_empty());
         }
     }
 }

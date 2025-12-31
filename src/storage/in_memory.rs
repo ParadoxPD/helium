@@ -1,11 +1,13 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use crate::buffer::buffer_pool::BufferPool;
 use crate::common::schema::Schema;
 use crate::exec::operator::Row;
-use crate::storage::btree::BPlusTree;
+use crate::storage::btree::DiskBPlusTree as BPlusTree;
 use crate::storage::btree::node::{Index, IndexKey};
 use crate::storage::page::{RowId, StorageRow};
+use crate::storage::page_manager::{FilePageManager, PageManager};
 use crate::storage::table::{Table, TableCursor};
 
 pub struct InMemoryTable {
@@ -31,7 +33,11 @@ impl InMemoryTable {
             .iter()
             .position(|c| c == column)
             .expect("column not found");
-        let mut index = BPlusTree::new(order);
+
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open("/tmp/temp.db").unwrap(),
+        ))));
+        let mut index = BPlusTree::new(order, bp);
 
         for row in &self.rows {
             if let Ok(key) = IndexKey::try_from(&row.values[col_idx]) {
@@ -93,8 +99,8 @@ impl Table for InMemoryTable {
         row.clone()
     }
 
-    fn get_index(&self, column: &str) -> Option<&dyn Index> {
-        self.indexes.get(column).map(|i| i as &dyn Index)
+    fn get_index(&self, column: &str) -> Option<Arc<dyn Index>> {
+        None
     }
 }
 

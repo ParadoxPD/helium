@@ -20,9 +20,40 @@ use crate::exec::project::ProjectExec;
 use crate::exec::scan::ScanExec;
 use crate::exec::sort::SortExec;
 use crate::ir::plan::LogicalPlan;
+use crate::storage::btree::node::Index;
 use crate::storage::table::Table;
 
-pub type Catalog = HashMap<String, Arc<dyn Table>>;
+pub struct Catalog {
+    pub tables: HashMap<String, Arc<dyn Table>>,
+    pub indexes: HashMap<(String, String), Arc<dyn Index>>,
+}
+
+impl Catalog {
+    pub fn new() -> Self {
+        Self {
+            tables: HashMap::new(),
+            indexes: HashMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, name: String, table: Arc<dyn Table>) {
+        self.tables.insert(name, table);
+    }
+
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Table>> {
+        self.tables.get(name).cloned()
+    }
+
+    pub fn add_index(&mut self, table: String, column: String, index: Arc<dyn Index>) {
+        self.indexes.insert((table, column), index);
+    }
+
+    pub fn get_index(&self, table: &str, column: &str) -> Option<Arc<dyn Index>> {
+        self.indexes
+            .get(&(table.to_string(), column.to_string()))
+            .cloned()
+    }
+}
 
 pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
     match plan {
@@ -57,14 +88,19 @@ pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
 
             Box::new(JoinExec::new(left, right, join.on.clone()))
         }
-        LogicalPlan::IndexScan(i) => {
-            let table = catalog.get(&i.table).unwrap();
+        LogicalPlan::IndexScan(scan) => {
+            let table = catalog.get(&scan.table).unwrap().clone();
+
+            let index = table
+                .get_index(&scan.column)
+                .expect("optimizer promised index")
+                .clone();
+
             Box::new(IndexScanExec::new(
                 table.clone(),
-                i.column.clone(),
-                i.value.clone(),
-                i.alias.clone(),
-                table.schema().clone(),
+                index,
+                scan.predicate.clone(),
+                table.schema().to_vec(),
             ))
         }
     }
@@ -72,15 +108,20 @@ pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::buffer::buffer_pool::BufferPool;
     use crate::common::value::Value;
     use crate::exec::operator::Operator;
     use crate::ir::expr::{BinaryOp, Expr};
-    use crate::ir::plan::LogicalPlan;
+    use crate::ir::plan::{IndexPredicate, LogicalPlan};
+    use crate::storage::btree::DiskBPlusTree;
+    use crate::storage::btree::node::IndexKey;
     use crate::storage::in_memory::InMemoryTable;
     use crate::storage::page::{PageId, RowId, StorageRow};
+    use crate::storage::page_manager::FilePageManager;
+    use crate::storage::table::HeapTable;
 
     fn srow(slot: u16, values: Vec<Value>) -> StorageRow {
         StorageRow {
@@ -181,6 +222,40 @@ mod tests {
 
         let row = exec.next().unwrap();
         assert_eq!(row.get("u.x"), Some(&Value::Int64(2)));
+        assert!(exec.next().is_none());
+    }
+
+    #[test]
+    fn index_scan_end_to_end() {
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        let mut table = HeapTable::new("t".into(), vec!["id".into()], 4, bp.clone());
+
+        let mut index = DiskBPlusTree::new(4, bp.clone());
+
+        for i in 0..10 {
+            let rid = table.insert(vec![Value::Int64(i)]);
+            index.insert(IndexKey::Int64(i), rid);
+        }
+
+        let table = Arc::new(table);
+        let index = Arc::new(index);
+
+        let mut exec = IndexScanExec::new(
+            table.clone(),
+            index,
+            IndexPredicate::Eq(Value::Int64(5)),
+            table.schema().to_vec(),
+        );
+
+        exec.open();
+        let row = exec.next().unwrap();
+
+        assert_eq!(row.iter().nth(0).unwrap(), (&"id".into(), &Value::Int64(5)));
         assert!(exec.next().is_none());
     }
 }

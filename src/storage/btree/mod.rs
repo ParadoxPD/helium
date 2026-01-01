@@ -6,12 +6,11 @@ pub mod node;
 
 use crate::{
     buffer::{buffer_pool::BufferPoolHandle, frame::PageFrame},
-    common::value::Value,
     storage::{
         btree::{
             internal::DiskInternalNode,
             leaf::DiskLeafNode,
-            node::{DiskBPlusNode, Index, IndexKey, NodeId},
+            node::{DiskBPlusNode, Index, IndexKey},
         },
         page::{PageId, RowId},
     },
@@ -300,7 +299,7 @@ impl DiskBPlusTree {
         }
     }
 
-    fn split_leaf(&mut self, leaf_pid: PageId) -> (IndexKey, PageId) {
+    fn _split_leaf(&mut self, leaf_pid: PageId) -> (IndexKey, PageId) {
         let mut pool = self.bp.lock().unwrap();
 
         let page = pool.fetch_page(leaf_pid);
@@ -343,7 +342,7 @@ impl DiskBPlusTree {
         (separator, new_leaf_pid)
     }
 
-    fn split_internal(&mut self, node_pid: PageId) -> (IndexKey, PageId) {
+    fn _split_internal(&mut self, node_pid: PageId) -> (IndexKey, PageId) {
         let mut pool = self.bp.lock().unwrap();
 
         let page = pool.fetch_page(node_pid);
@@ -609,7 +608,7 @@ impl DiskBPlusTree {
     fn rebalance_internal(&mut self, parent_id: PageId, child_idx: usize) {
         let parent = self.load_node(parent_id);
 
-        let (children_len, child_id) = match &parent {
+        let (children_len, _child_id) = match &parent {
             DiskBPlusNode::Internal(i) => (i.children.len(), i.children[child_idx]),
             _ => unreachable!(),
         };
@@ -712,11 +711,11 @@ impl DiskBPlusTree {
         self.order - 1
     }
 
-    fn max_keys(&self) -> usize {
+    fn _max_keys(&self) -> usize {
         self.order - 1
     }
 
-    fn min_keys(&self) -> usize {
+    fn _min_keys(&self) -> usize {
         (self.order - 1) / 2
     }
 

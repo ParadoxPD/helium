@@ -1,5 +1,5 @@
 use crate::{
-    exec::Catalog,
+    exec::catalog::Catalog,
     ir::{
         expr::{BinaryOp, Expr},
         plan::{Filter, IndexPredicate, IndexScan, LogicalPlan, Project},
@@ -67,12 +67,11 @@ mod tests {
 
     use crate::buffer::buffer_pool::BufferPool;
     use crate::common::value::Value;
-    use crate::exec::Catalog;
+    use crate::exec::catalog::Catalog;
     use crate::ir::expr::{BinaryOp, Expr};
     use crate::ir::plan::{Filter, IndexScan, LogicalPlan, Scan};
     use crate::optimizer::index_selection::index_selection;
     use crate::storage::btree::DiskBPlusTree;
-    use crate::storage::in_memory::InMemoryTable;
     use crate::storage::page_manager::FilePageManager;
     use crate::storage::table::HeapTable;
 
@@ -93,12 +92,12 @@ mod tests {
         );
 
         // ---- disk index ----
-        let index = Arc::new(DiskBPlusTree::new(4, bp.clone()));
+        let index = Arc::new(Mutex::new(DiskBPlusTree::new(4, bp.clone())));
 
         // ---- catalog ----
         let mut catalog = Catalog::new();
         catalog.insert("users".into(), Arc::new(table));
-        catalog.add_index("users".into(), "age".into(), index);
+        catalog.add_index("a".into(), "users".into(), "age".into(), index);
 
         // ---- logical plan ----
         let scan = LogicalPlan::Scan(Scan {

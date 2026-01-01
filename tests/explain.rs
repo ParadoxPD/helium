@@ -4,7 +4,7 @@ use helpers::harness::TestDB;
 
 #[test]
 fn explain_structure() {
-    let db = TestDB::new();
+    let mut db = TestDB::new();
 
     let plan = db.explain(
         "

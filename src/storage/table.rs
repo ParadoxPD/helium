@@ -1,13 +1,11 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::{
     buffer::buffer_pool::BufferPoolHandle,
     common::{schema::Schema, value::Value},
-    exec::operator::Row,
     storage::{
         btree::node::Index,
-        page::{HeapPageHandle, Page, PageId, RowId, RowPage, RowSlot, StorageRow},
-        page_manager::PageManagerHandle,
+        page::{HeapPageHandle, Page, PageId, RowId, RowPage, StorageRow},
     },
 };
 
@@ -16,6 +14,9 @@ pub trait Table: Send + Sync {
     fn schema(&self) -> &Schema;
     fn fetch(&self, rid: RowId) -> StorageRow;
     fn get_index(&self, column: &str) -> Option<Arc<dyn Index>>;
+    fn delete(&self, rid: RowId) -> bool;
+    fn update(&self, rid: RowId, values: Vec<Value>) -> bool;
+    fn insert(&self, values: Vec<Value>) -> RowId;
 }
 
 pub trait TableCursor {
@@ -25,7 +26,7 @@ pub trait TableCursor {
 pub struct HeapTable {
     name: String,
     schema: Schema,
-    pages: Vec<PageId>,
+    pages: Mutex<Vec<PageId>>,
     page_capacity: usize,
     bp: BufferPoolHandle,
 }
@@ -52,75 +53,15 @@ impl HeapTable {
         Self {
             name,
             schema,
-            pages: vec![pid],
+            pages: Mutex::new(vec![pid]),
             page_capacity,
             bp,
         }
     }
-
-    pub fn insert(&mut self, values: Vec<Value>) -> RowId {
-        let last_pid = *self.pages.last().unwrap();
-
-        {
-            let mut bp = self.bp.lock().unwrap();
-            let frame = bp.fetch_page(last_pid);
-            let mut page = RowPage::from_bytes(last_pid, &frame.data);
-
-            if let Some(rid) = page.insert(values.clone()) {
-                page.write_bytes(&mut frame.data);
-                bp.unpin_page(last_pid, true);
-                return rid;
-            }
-
-            bp.unpin_page(last_pid, false);
+    pub fn insert_rows(&mut self, rows: Vec<Vec<Value>>) {
+        for row in rows {
+            self.insert(row);
         }
-
-        let mut bp = self.bp.lock().unwrap();
-        let pid = bp.pm.allocate_page();
-
-        let mut page = RowPage::new(pid, self.page_capacity);
-        let rid = page.insert(values).unwrap();
-
-        let frame = bp.fetch_page(pid);
-        page.write_bytes(&mut frame.data);
-        bp.unpin_page(pid, true);
-
-        self.pages.push(pid);
-        rid
-    }
-
-    pub fn update(&mut self, rid: RowId, values: Vec<Value>) -> bool {
-        let mut bp = self.bp.lock().unwrap();
-
-        let frame = bp.fetch_page(rid.page_id);
-        let mut page = RowPage::from_bytes(rid.page_id, &frame.data);
-
-        let ok = page.update(rid.slot_id, values);
-        if ok {
-            page.write_bytes(&mut frame.data);
-            bp.unpin_page(rid.page_id, true);
-        } else {
-            bp.unpin_page(rid.page_id, false);
-        }
-
-        ok
-    }
-
-    pub fn delete(&mut self, rid: RowId) -> bool {
-        let mut bp = self.bp.lock().unwrap();
-
-        let frame = bp.fetch_page(rid.page_id);
-        let mut page = RowPage::from_bytes(rid.page_id, &frame.data);
-
-        let ok = page.delete(rid.slot_id);
-        if ok {
-            page.write_bytes(&mut frame.data);
-            bp.unpin_page(rid.page_id, true);
-        } else {
-            bp.unpin_page(rid.page_id, false);
-        }
-
-        ok
     }
 }
 
@@ -147,6 +88,74 @@ impl Table for HeapTable {
     fn get_index(&self, _column: &str) -> Option<Arc<dyn Index>> {
         None
     }
+
+    fn insert(&self, values: Vec<Value>) -> RowId {
+        let last_pid = {
+            let pages = self.pages.lock().unwrap();
+            *pages.last().unwrap()
+        };
+
+        {
+            let mut bp = self.bp.lock().unwrap();
+            let frame = bp.fetch_page(last_pid);
+            let mut page = RowPage::from_bytes(last_pid, &frame.data);
+
+            if let Some(rid) = page.insert(values.clone()) {
+                page.write_bytes(&mut frame.data);
+                bp.unpin_page(last_pid, true);
+                return rid;
+            }
+
+            bp.unpin_page(last_pid, false);
+        }
+
+        let mut bp = self.bp.lock().unwrap();
+        let pid = bp.pm.allocate_page();
+
+        let mut page = RowPage::new(pid, self.page_capacity);
+        let rid = page.insert(values).unwrap();
+
+        let frame = bp.fetch_page(pid);
+        page.write_bytes(&mut frame.data);
+        bp.unpin_page(pid, true);
+
+        self.pages.lock().unwrap().push(pid);
+        rid
+    }
+
+    fn update(&self, rid: RowId, values: Vec<Value>) -> bool {
+        let mut bp = self.bp.lock().unwrap();
+
+        let frame = bp.fetch_page(rid.page_id);
+        let mut page = RowPage::from_bytes(rid.page_id, &frame.data);
+
+        let ok = page.update(rid.slot_id, values);
+        if ok {
+            page.write_bytes(&mut frame.data);
+            bp.unpin_page(rid.page_id, true);
+        } else {
+            bp.unpin_page(rid.page_id, false);
+        }
+
+        ok
+    }
+
+    fn delete(&self, rid: RowId) -> bool {
+        let mut bp = self.bp.lock().unwrap();
+
+        let frame = bp.fetch_page(rid.page_id);
+        let mut page = RowPage::from_bytes(rid.page_id, &frame.data);
+
+        let ok = page.delete(rid.slot_id);
+        if ok {
+            page.write_bytes(&mut frame.data);
+            bp.unpin_page(rid.page_id, true);
+        } else {
+            bp.unpin_page(rid.page_id, false);
+        }
+
+        ok
+    }
 }
 
 impl HeapTableCursor {
@@ -162,28 +171,31 @@ impl HeapTableCursor {
 impl TableCursor for HeapTableCursor {
     fn next(&mut self) -> Option<StorageRow> {
         loop {
-            if self.page_idx >= self.table.pages.len() {
+            let pages = self.table.pages.lock().unwrap();
+            if self.page_idx >= pages.len() {
                 return None;
             }
 
-            let pid = self.table.pages[self.page_idx];
+            let pid = pages[self.page_idx];
+            drop(pages);
 
             let mut bp = self.table.bp.lock().unwrap();
             let frame = bp.fetch_page(pid);
             let page = RowPage::from_bytes(pid, &frame.data);
+            bp.unpin_page(pid, false);
 
             while self.slot_idx < page.capacity() as u16 {
                 let slot = self.slot_idx;
                 self.slot_idx += 1;
 
-                if let Some(row) = page.get(slot) {
-                    let result = row.clone();
-                    bp.unpin_page(pid, false);
-                    return Some(result);
+                if let Some(mut row) = page.get(slot).cloned() {
+                    row.rid = RowId {
+                        page_id: pid,
+                        slot_id: slot,
+                    };
+                    return Some(row);
                 }
             }
-
-            bp.unpin_page(pid, false);
 
             self.page_idx += 1;
             self.slot_idx = 0;
@@ -215,7 +227,7 @@ mod tests {
         t.insert(vec![Value::Int64(2)]);
         t.insert(vec![Value::Int64(3)]);
 
-        assert_eq!(t.pages.len(), 2);
+        assert_eq!(t.pages.lock().unwrap().len(), 2);
     }
 
     #[test]

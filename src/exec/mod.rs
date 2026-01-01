@@ -1,3 +1,4 @@
+pub mod catalog;
 pub mod expr_eval;
 pub mod filter;
 pub mod index_scan;
@@ -9,51 +10,20 @@ pub mod scan;
 pub mod sort;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use crate::exec::catalog::Catalog;
 use crate::exec::filter::FilterExec;
 use crate::exec::index_scan::IndexScanExec;
 use crate::exec::join::JoinExec;
 use crate::exec::limit::LimitExec;
-use crate::exec::operator::{Operator, Row};
+use crate::exec::operator::Operator;
 use crate::exec::project::ProjectExec;
 use crate::exec::scan::ScanExec;
 use crate::exec::sort::SortExec;
 use crate::ir::plan::LogicalPlan;
 use crate::storage::btree::node::Index;
 use crate::storage::table::Table;
-
-pub struct Catalog {
-    pub tables: HashMap<String, Arc<dyn Table>>,
-    pub indexes: HashMap<(String, String), Arc<dyn Index>>,
-}
-
-impl Catalog {
-    pub fn new() -> Self {
-        Self {
-            tables: HashMap::new(),
-            indexes: HashMap::new(),
-        }
-    }
-
-    pub fn insert(&mut self, name: String, table: Arc<dyn Table>) {
-        self.tables.insert(name, table);
-    }
-
-    pub fn get(&self, name: &str) -> Option<Arc<dyn Table>> {
-        self.tables.get(name).cloned()
-    }
-
-    pub fn add_index(&mut self, table: String, column: String, index: Arc<dyn Index>) {
-        self.indexes.insert((table, column), index);
-    }
-
-    pub fn get_index(&self, table: &str, column: &str) -> Option<Arc<dyn Index>> {
-        self.indexes
-            .get(&(table.to_string(), column.to_string()))
-            .cloned()
-    }
-}
 
 pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
     match plan {
@@ -91,15 +61,17 @@ pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
         LogicalPlan::IndexScan(scan) => {
             let table = catalog.get(&scan.table).unwrap().clone();
 
-            let index = table
-                .get_index(&scan.column)
+            let index = catalog
+                .get_index(&scan.table, &scan.column)
                 .expect("optimizer promised index")
                 .clone();
 
             Box::new(IndexScanExec::new(
                 table.clone(),
+                scan.table.clone(),
                 index,
                 scan.predicate.clone(),
+                scan.column.clone(),
                 table.schema().to_vec(),
             ))
         }
@@ -118,35 +90,28 @@ mod tests {
     use crate::ir::plan::{IndexPredicate, LogicalPlan};
     use crate::storage::btree::DiskBPlusTree;
     use crate::storage::btree::node::IndexKey;
-    use crate::storage::in_memory::InMemoryTable;
-    use crate::storage::page::{PageId, RowId, StorageRow};
     use crate::storage::page_manager::FilePageManager;
     use crate::storage::table::HeapTable;
-
-    fn srow(slot: u16, values: Vec<Value>) -> StorageRow {
-        StorageRow {
-            rid: RowId {
-                page_id: PageId(0),
-                slot_id: slot,
-            },
-            values,
-        }
-    }
 
     #[test]
     fn execute_simple_scan() {
         let schema = vec!["id confirmed".into(), "name".into(), "age".into()];
 
         let rows = vec![
-            srow(0, vec![Value::Int64(1), Value::Null, Value::Null]),
-            srow(1, vec![Value::Int64(2), Value::Null, Value::Null]),
+            vec![Value::Int64(1), Value::Null, Value::Null],
+            vec![Value::Int64(2), Value::Null, Value::Null],
         ];
 
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        let mut table = HeapTable::new("users".into(), schema.clone(), 4, bp.clone());
+        table.insert_rows(rows);
+
         let mut catalog = Catalog::new();
-        catalog.insert(
-            "users".into(),
-            Arc::new(InMemoryTable::new("users".into(), schema.clone(), rows)),
-        );
+        catalog.insert("users".into(), Arc::new(table));
 
         let plan = LogicalPlan::scan("users", "u");
         let mut exec = lower(&plan, &catalog);
@@ -162,16 +127,21 @@ mod tests {
         let schema = vec!["name".into(), "age".into()];
 
         let rows = vec![
-            srow(0, vec![Value::String("Alice".into()), Value::Int64(30)]),
-            srow(1, vec![Value::String("Bob".into()), Value::Int64(15)]),
-            srow(2, vec![Value::String("Carol".into()), Value::Int64(40)]),
+            vec![Value::String("Alice".into()), Value::Int64(30)],
+            vec![Value::String("Bob".into()), Value::Int64(15)],
+            vec![Value::String("Carol".into()), Value::Int64(40)],
         ];
 
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        let mut table = HeapTable::new("users".into(), schema.clone(), 4, bp.clone());
+        table.insert_rows(rows);
+
         let mut catalog = Catalog::new();
-        catalog.insert(
-            "users".into(),
-            Arc::new(InMemoryTable::new("users".into(), schema.clone(), rows)),
-        );
+        catalog.insert("users".into(), Arc::new(table));
 
         let plan = LogicalPlan::scan("users", "u")
             .filter(Expr::bin(
@@ -198,16 +168,21 @@ mod tests {
         let schema = vec!["x".into()];
 
         let rows = vec![
-            srow(0, vec![Value::Int64(1)]),
-            srow(1, vec![Value::Int64(2)]),
-            srow(2, vec![Value::Int64(3)]),
+            vec![Value::Int64(1)],
+            vec![Value::Int64(2)],
+            vec![Value::Int64(3)],
         ];
 
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        let mut table = HeapTable::new("users".into(), schema.clone(), 4, bp.clone());
+        table.insert_rows(rows);
+
         let mut catalog = Catalog::new();
-        catalog.insert(
-            "users".into(),
-            Arc::new(InMemoryTable::new("users".into(), schema.clone(), rows)),
-        );
+        catalog.insert("users".into(), Arc::new(table));
 
         let plan = LogicalPlan::scan("users", "u")
             .filter(Expr::bin(
@@ -234,7 +209,6 @@ mod tests {
         ))));
 
         let mut table = HeapTable::new("t".into(), vec!["id".into()], 4, bp.clone());
-
         let mut index = DiskBPlusTree::new(4, bp.clone());
 
         for i in 0..10 {
@@ -243,19 +217,21 @@ mod tests {
         }
 
         let table = Arc::new(table);
-        let index = Arc::new(index);
+        let index = Arc::new(Mutex::new(index));
 
         let mut exec = IndexScanExec::new(
             table.clone(),
+            "t".into(),
             index,
             IndexPredicate::Eq(Value::Int64(5)),
+            "id".into(),
             table.schema().to_vec(),
         );
 
         exec.open();
         let row = exec.next().unwrap();
 
-        assert_eq!(row.iter().nth(0).unwrap(), (&"id".into(), &Value::Int64(5)));
+        assert_eq!(row.get("t.id"), Some(&Value::Int64(5)));
         assert!(exec.next().is_none());
     }
 }

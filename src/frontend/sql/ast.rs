@@ -1,12 +1,25 @@
+use crate::common::value::Value;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     Select(SelectStmt),
-    Explain { analyze: bool, stmt: Box<Statement> },
+    Explain {
+        analyze: bool,
+        stmt: Box<Statement>,
+    },
+    CreateIndex {
+        name: String,
+        table: String,
+        column: String,
+    },
+    DropIndex {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectStmt {
-    pub columns: Vec<String>,
+    pub columns: Vec<Expr>,
     pub from: FromItem,
     pub where_clause: Option<Expr>,
     pub order_by: Vec<OrderByExpr>,
@@ -15,8 +28,11 @@ pub struct SelectStmt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    Column(String),
-    LiteralInt(i64),
+    Column {
+        table: Option<String>,
+        name: String,
+    },
+    Literal(Value),
     Binary {
         left: Box<Expr>,
         op: BinaryOp,
@@ -26,16 +42,24 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderByExpr {
-    pub column: String,
+    pub expr: Expr,
     pub asc: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Eq,
+    Neq,
     Gt,
+    Gte,
     Lt,
+    Lte,
     And,
+    Or,
+    Add,
+    Sub,
+    Mul,
+    Div,
 }
 
 #[derive(Debug, Clone, PartialEq)]

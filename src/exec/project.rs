@@ -42,36 +42,31 @@ impl Operator for ProjectExec {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::buffer::buffer_pool::BufferPool;
     use crate::common::value::Value;
     use crate::exec::operator::Operator;
     use crate::exec::scan::ScanExec;
     use crate::ir::expr::{BinaryOp, Expr};
-    use crate::storage::in_memory::InMemoryTable;
-    use crate::storage::page::{PageId, RowId, StorageRow};
-
-    fn srow(slot: u16, values: Vec<Value>) -> StorageRow {
-        StorageRow {
-            rid: RowId {
-                page_id: PageId(0),
-                slot_id: slot,
-            },
-            values,
-        }
-    }
+    use crate::storage::page_manager::FilePageManager;
+    use crate::storage::table::HeapTable;
 
     #[test]
     fn project_selects_columns() {
         let schema = vec!["name".into(), "age".into()];
-        let rows = vec![srow(
-            0,
-            vec![Value::String("Alice".into()), Value::Int64(30)],
-        )];
+        let rows = vec![vec![Value::String("Alice".into()), Value::Int64(30)]];
 
-        let table = Arc::new(InMemoryTable::new("t".into(), schema.clone(), rows));
-        let scan = ScanExec::new(table, "t".into(), schema);
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        let mut table = HeapTable::new("t".into(), schema.clone(), 4, bp);
+        table.insert_rows(rows);
+
+        let scan = ScanExec::new(Arc::new(table), "t".into(), schema);
 
         let mut project = ProjectExec::new(
             Box::new(scan),
@@ -94,10 +89,17 @@ mod tests {
     #[test]
     fn project_computes_expressions() {
         let schema = vec!["age".into()];
-        let rows = vec![srow(0, vec![Value::Int64(20)])];
+        let rows = vec![vec![Value::Int64(20)]];
 
-        let table = Arc::new(InMemoryTable::new("t".into(), schema.clone(), rows));
-        let scan = ScanExec::new(table, "t".into(), schema);
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        let mut table = HeapTable::new("t".into(), schema.clone(), 4, bp);
+        table.insert_rows(rows);
+
+        let scan = ScanExec::new(Arc::new(table), "t".into(), schema);
 
         let expr = Expr::bin(
             Expr::bound_col("t", "age"),
@@ -116,10 +118,17 @@ mod tests {
     #[test]
     fn project_handles_missing_column_as_null() {
         let schema = vec!["name".into()];
-        let rows = vec![srow(0, vec![Value::String("Bob".into())])];
+        let rows = vec![vec![Value::String("Bob".into())]];
 
-        let table = Arc::new(InMemoryTable::new("t".into(), schema.clone(), rows));
-        let scan = ScanExec::new(table, "t".into(), schema);
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        let mut table = HeapTable::new("t".into(), schema.clone(), 4, bp);
+        table.insert_rows(rows);
+
+        let scan = ScanExec::new(Arc::new(table), "t".into(), schema);
 
         let mut project = ProjectExec::new(
             Box::new(scan),
@@ -135,13 +144,17 @@ mod tests {
     #[test]
     fn project_preserves_row_count() {
         let schema = vec!["x".into()];
-        let rows = vec![
-            srow(0, vec![Value::Int64(1)]),
-            srow(1, vec![Value::Int64(2)]),
-        ];
+        let rows = vec![vec![Value::Int64(1)], vec![Value::Int64(2)]];
 
-        let table = Arc::new(InMemoryTable::new("t".into(), schema.clone(), rows));
-        let scan = ScanExec::new(table, "t".into(), schema);
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        let mut table = HeapTable::new("t".into(), schema.clone(), 4, bp);
+        table.insert_rows(rows);
+
+        let scan = ScanExec::new(Arc::new(table), "t".into(), schema);
 
         let mut project = ProjectExec::new(
             Box::new(scan),

@@ -1,9 +1,4 @@
-use std::collections::HashMap;
-
-use crate::{
-    buffer::frame::PAGE_SIZE, common::value::Value, exec::operator::Row,
-    storage::page_manager::PageManager,
-};
+use crate::{buffer::frame::PAGE_SIZE, common::value::Value, storage::page_manager::PageManager};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PageId(pub u64);
@@ -388,18 +383,8 @@ mod tests {
     use crate::{
         buffer::frame::PAGE_SIZE,
         common::value::Value,
-        storage::page::{Page, PageId, RowId, RowPage, StorageRow},
+        storage::page::{Page, PageId, RowPage},
     };
-
-    fn srow(values: Vec<Value>) -> StorageRow {
-        StorageRow {
-            rid: RowId {
-                page_id: PageId(0),
-                slot_id: 0,
-            },
-            values,
-        }
-    }
 
     #[test]
     fn page_respects_capacity() {

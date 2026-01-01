@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::exec::operator::{Operator, Row};
-use crate::storage::page::StorageRow;
 use crate::storage::table::{Table, TableCursor};
 
 pub struct ScanExec<'a> {
@@ -50,39 +49,32 @@ impl<'a> Operator for ScanExec<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use crate::{
+        buffer::buffer_pool::BufferPool,
         common::value::Value,
         exec::{operator::Operator, scan::ScanExec},
         storage::{
-            in_memory::InMemoryTable,
-            page::{PageId, RowId, StorageRow},
-            table::Table,
+            page_manager::FilePageManager,
+            table::{HeapTable, Table},
         },
     };
-
-    fn srow(slot: u16, values: Vec<Value>) -> StorageRow {
-        StorageRow {
-            rid: RowId {
-                page_id: PageId(0),
-                slot_id: slot,
-            },
-            values,
-        }
-    }
 
     #[test]
     fn scan_returns_all_rows() {
         let schema = vec!["id".into()];
-        let rows = vec![
-            srow(0, vec![Value::Int64(1)]),
-            srow(1, vec![Value::Int64(2)]),
-        ];
+        let rows = vec![vec![Value::Int64(1)], vec![Value::Int64(2)]];
 
-        let table = Arc::new(InMemoryTable::new("t".into(), schema.clone(), rows));
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
 
-        let mut scan = ScanExec::new(table, "t".into(), schema);
+        let mut table = HeapTable::new("t".into(), schema.clone(), 4, bp);
+        table.insert_rows(rows);
+
+        let mut scan = ScanExec::new(Arc::new(table), "t".into(), schema);
         scan.open();
 
         assert!(scan.next().is_some());
@@ -93,13 +85,17 @@ mod tests {
     #[test]
     fn table_cursor_emits_distinct_row_ids() {
         let schema = vec!["id".into()];
-        let rows = vec![
-            srow(0, vec![Value::Int64(1)]),
-            srow(1, vec![Value::Int64(2)]),
-        ];
+        let rows = vec![vec![Value::Int64(1)], vec![Value::Int64(2)]];
 
-        let table = Arc::new(InMemoryTable::new("users".into(), schema, rows));
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
 
+        let mut table = HeapTable::new("users".into(), schema.clone(), 4, bp);
+        table.insert_rows(rows);
+
+        let table = Arc::new(table);
         let mut cursor = table.scan();
 
         let r1 = cursor.next().unwrap();

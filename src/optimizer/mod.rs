@@ -3,9 +3,8 @@ pub mod index_selection;
 pub mod predicate_pushdown;
 pub mod projection_prune;
 
-use crate::exec::Catalog;
-use crate::ir::expr::{BinaryOp, Expr};
-use crate::ir::plan::{IndexScan, LogicalPlan};
+use crate::exec::catalog::Catalog;
+use crate::ir::plan::LogicalPlan;
 
 use crate::optimizer::{
     constant_fold::constant_fold, index_selection::index_selection,

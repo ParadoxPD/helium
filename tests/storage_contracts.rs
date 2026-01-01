@@ -5,7 +5,6 @@ use helpers::{data::users, harness::TestDB};
 use crate::helpers::data::users_schema;
 
 #[test]
-#[ignore = "unlocked when disk storage exists"]
 fn disk_and_memory_storage_match() {
     let mut db = TestDB::new();
     db.register_table("users", users_schema(), users());

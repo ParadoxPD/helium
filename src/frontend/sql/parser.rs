@@ -1,3 +1,5 @@
+use crate::common::value::Value;
+
 use super::ast::*;
 use std::str::FromStr;
 
@@ -20,6 +22,44 @@ pub fn parse(sql: &str) -> Statement {
             analyze,
             stmt: Box::new(parse(&rest)),
         };
+    }
+
+    if parts.peek() == Some(&"CREATE") {
+        parts.next(); // CREATE
+        assert_eq!(parts.next(), Some("INDEX"));
+
+        let name = parts.next().expect("index name").to_string();
+        assert_eq!(parts.next(), Some("ON"));
+
+        let table_and_col = parts.next().expect("table(col)");
+
+        let (table, column) = if let Some((t, rest)) = table_and_col.split_once('(') {
+            let col = rest.trim_end_matches(')');
+            (t.to_string(), col.to_string())
+        } else {
+            // handle: CREATE INDEX idx ON users (age)
+            let table = table_and_col.to_string();
+            let col = parts
+                .next()
+                .expect("column")
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .to_string();
+            (table, col)
+        };
+
+        return Statement::CreateIndex {
+            name,
+            table,
+            column,
+        };
+    }
+    if parts.peek() == Some(&"DROP") {
+        parts.next();
+        assert_eq!(parts.next(), Some("INDEX"));
+        let name = parts.next().unwrap().to_string();
+
+        return Statement::DropIndex { name };
     }
 
     Statement::Select(parse_select(&mut parts))
@@ -59,7 +99,7 @@ where
             break;
         }
         let col = parts.next().unwrap().trim_end_matches(',');
-        columns.push(col.to_string());
+        columns.push(parse_column(col));
     }
 
     assert_eq!(parts.next(), Some("FROM"));
@@ -133,7 +173,10 @@ where
                         }
                     }
 
-                    order_by.push(OrderByExpr { column: col, asc });
+                    order_by.push(OrderByExpr {
+                        expr: parse_column(&col),
+                        asc,
+                    });
 
                     // Stop if next clause begins
                     match parts.peek() {
@@ -163,27 +206,53 @@ fn parse_simple_predicate<'a, I>(parts: &mut std::iter::Peekable<I>) -> Expr
 where
     I: Iterator<Item = &'a str>,
 {
-    let left = Expr::Column(parts.next().unwrap().to_string());
+    let left_tok = parts.next().unwrap();
+    let left = parse_column(left_tok);
 
     let op = match parts.next().unwrap() {
         "=" => BinaryOp::Eq,
+        "!=" => BinaryOp::Neq,
         ">" => BinaryOp::Gt,
+        ">=" => BinaryOp::Gte,
         "<" => BinaryOp::Lt,
+        "<=" => BinaryOp::Lte,
         _ => panic!("unsupported operator"),
     };
 
     let rhs_tok = parts.next().unwrap();
 
     let right = if let Ok(v) = rhs_tok.parse::<i64>() {
-        Expr::LiteralInt(v)
+        Expr::Literal(Value::Int64(v))
     } else {
-        Expr::Column(rhs_tok.to_string())
+        parse_column(rhs_tok)
     };
 
+    println!(
+        "Parse = {:?}",
+        Expr::Binary {
+            left: Box::new(left.clone()),
+            op,
+            right: Box::new(right.clone())
+        }
+    );
     Expr::Binary {
         left: Box::new(left),
         op,
         right: Box::new(right),
+    }
+}
+
+fn parse_column(tok: &str) -> Expr {
+    if let Some((t, c)) = tok.split_once('.') {
+        Expr::Column {
+            table: Some(t.to_string()),
+            name: c.to_string(),
+        }
+    } else {
+        Expr::Column {
+            table: None,
+            name: tok.to_string(),
+        }
     }
 }
 

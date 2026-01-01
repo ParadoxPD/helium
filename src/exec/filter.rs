@@ -1,7 +1,6 @@
-use crate::common::value::Value;
-use crate::exec::expr_eval::{eval_predicate, eval_value};
+use crate::exec::expr_eval::eval_predicate;
 use crate::exec::operator::{Operator, Row};
-use crate::ir::expr::{BinaryOp, Expr};
+use crate::ir::expr::Expr;
 
 pub struct FilterExec {
     input: Box<dyn Operator>,
@@ -22,17 +21,18 @@ impl Operator for FilterExec {
     fn next(&mut self) -> Option<Row> {
         while let Some(row) = self.input.next() {
             let val = eval_predicate(&self.predicate, &row);
-            eprintln!("[FilterExec] row = {:?}, predicate = {:?}", row, val);
+            println!("[FilterExec] row = {:?}, predicate = {:?}", row, val);
 
             if matches!(val, true) {
-                eprintln!("[FilterExec] PASSED");
+                println!("[FilterExec] PASSED");
+
                 return Some(row);
             } else {
-                eprintln!("[FilterExec] REJECTED");
+                println!("[FilterExec] REJECTED");
             }
         }
 
-        eprintln!("[FilterExec] EOF");
+        println!("[FilterExec] EOF");
         None
     }
     fn close(&mut self) {
@@ -42,40 +42,38 @@ impl Operator for FilterExec {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use crate::{
-        common::{schema::Schema, value::Value},
+        buffer::buffer_pool::BufferPool,
+        common::value::Value,
         exec::{filter::FilterExec, operator::Operator, scan::ScanExec},
         ir::expr::{BinaryOp, Expr},
         storage::{
-            in_memory::InMemoryTable,
             page::{PageId, RowId, StorageRow},
+            page_manager::FilePageManager,
+            table::{HeapTable, Table},
         },
     };
 
     #[test]
     fn filter_removes_rows() {
-        let schema = vec!["age".into()];
+        let schema = vec!["id".into(), "age".into()];
 
         let rows = vec![
-            StorageRow {
-                rid: RowId {
-                    page_id: PageId(0),
-                    slot_id: 0,
-                },
-                values: vec![Value::Int64(10)],
-            },
-            StorageRow {
-                rid: RowId {
-                    page_id: PageId(0),
-                    slot_id: 1,
-                },
-                values: vec![Value::Int64(30)],
-            },
+            vec![Value::Int64(1), Value::Int64(10)],
+            vec![Value::Int64(2), Value::Int64(30)],
         ];
 
-        let table = InMemoryTable::new("users".into(), schema.clone(), rows);
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        // -------- create table --------
+        let mut table = HeapTable::new("users".into(), schema.clone(), 4, bp.clone());
+        table.insert_rows(rows);
 
         let scan = ScanExec::new(Arc::new(table), "users".into(), schema);
 

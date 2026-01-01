@@ -106,6 +106,17 @@ impl Value {
     }
 }
 
+impl Value {
+    pub fn cmp(&self, other: &Value) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
+            (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
+            (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

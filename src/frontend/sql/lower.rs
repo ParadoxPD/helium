@@ -1,4 +1,6 @@
+use crate::exec::catalog::Catalog;
 use crate::frontend::sql::binder::{Binder, BoundFromItem, BoundSelect};
+use crate::frontend::sql::pretty_binder::pretty_bound;
 use crate::ir::expr::Expr as IRExpr;
 use crate::ir::plan::{Join, LogicalPlan, Sort};
 
@@ -6,22 +8,44 @@ use super::ast::*;
 
 pub enum Lowered {
     Plan(LogicalPlan),
-    Explain { analyze: bool, plan: LogicalPlan },
+    Explain {
+        analyze: bool,
+        plan: LogicalPlan,
+    },
+    CreateIndex {
+        name: String,
+        table: String,
+        column: String,
+    },
+    DropIndex {
+        name: String,
+    },
 }
 
-pub fn lower_stmt(stmt: Statement) -> Lowered {
+pub fn lower_stmt(stmt: Statement, catalog: &Catalog) -> Lowered {
     match stmt {
         Statement::Select(s) => {
-            let bound = Binder::bind(s).expect("bind error");
+            let bound = Binder::bind(s, catalog).expect("bind error");
+            println!("BOUND:\n{}", pretty_bound(&bound));
             Lowered::Plan(lower_select(bound))
         }
         Statement::Explain { analyze, stmt } => {
-            let inner = lower_stmt(*stmt);
+            let inner = lower_stmt(*stmt, catalog);
             match inner {
                 Lowered::Plan(plan) => Lowered::Explain { analyze, plan },
                 _ => unreachable!(),
             }
         }
+        Statement::CreateIndex {
+            name,
+            table,
+            column,
+        } => Lowered::CreateIndex {
+            name,
+            table,
+            column,
+        },
+        Statement::DropIndex { name } => Lowered::DropIndex { name },
     }
 }
 
@@ -81,6 +105,7 @@ fn output_name(expr: &IRExpr) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exec::catalog::Catalog;
     use crate::frontend::sql::parser::parse;
     use crate::ir::pretty::pretty;
 
@@ -88,7 +113,9 @@ mod tests {
     fn lowers_simple_select() {
         let sql = "SELECT name FROM users;";
         let stmt = parse(sql);
-        let lowered = lower_stmt(stmt);
+        let catalog = Catalog::new();
+
+        let lowered = lower_stmt(stmt, &catalog);
 
         let expected = r#"
 Project [name]
@@ -107,7 +134,9 @@ Project [name]
     fn lowers_select_where_limit() {
         let sql = "SELECT name FROM users WHERE age > 18 LIMIT 5;";
         let stmt = parse(sql);
-        let lowered = lower_stmt(stmt);
+        let catalog = Catalog::new();
+
+        let lowered = lower_stmt(stmt, &catalog);
 
         let expected = r#"
 Limit 5
@@ -117,7 +146,9 @@ Limit 5
 "#;
 
         match lowered {
-            Lowered::Plan(plan) => assert_eq!(pretty(&plan).trim(), expected.trim()),
+            Lowered::Plan(plan) => {
+                assert_eq!(pretty(&plan).trim(), expected.trim())
+            }
             _ => unreachable!(),
         }
     }
@@ -125,7 +156,9 @@ Limit 5
     #[test]
     fn explain_select() {
         let stmt = parse("EXPLAIN SELECT name FROM users;");
-        let lowered = lower_stmt(stmt);
+        let catalog = Catalog::new();
+
+        let lowered = lower_stmt(stmt, &catalog);
 
         match lowered {
             Lowered::Explain { analyze, plan } => {
@@ -139,7 +172,9 @@ Limit 5
     #[test]
     fn lowers_order_by() {
         let stmt = parse("SELECT name FROM users ORDER BY age DESC;");
-        let lowered = lower_stmt(stmt);
+        let catalog = Catalog::new();
+
+        let lowered = lower_stmt(stmt, &catalog);
 
         match lowered {
             Lowered::Plan(plan) => {
@@ -149,19 +184,13 @@ Limit 5
             _ => panic!("expected plan"),
         }
     }
-}
-
-#[cfg(test)]
-mod join_lowering_tests {
-    use super::*;
-    use crate::frontend::sql::parser::parse;
-    use crate::ir::pretty::pretty;
 
     #[test]
     fn lowers_join_into_logical_plan() {
         let stmt = parse("SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id;");
+        let catalog = Catalog::new();
 
-        let lowered = lower_stmt(stmt);
+        let lowered = lower_stmt(stmt, &catalog);
 
         match lowered {
             Lowered::Plan(plan) => {

@@ -17,21 +17,21 @@ impl TestDB {
         self.db.insert_table(name, schema, rows);
     }
 
-    pub fn query(&self, sql: &str) -> Vec<Row> {
+    pub fn query(&mut self, sql: &str) -> Vec<Row> {
         match self.db.query(sql) {
             QueryResult::Rows(rows) => rows,
             other => panic!("Expected rows, got {:?}", other),
         }
     }
 
-    pub fn explain(&self, sql: &str) -> String {
+    pub fn explain(&mut self, sql: &str) -> String {
         match self.db.query(&format!("EXPLAIN {sql}")) {
             QueryResult::Explain(s) => s,
             other => panic!("Expected EXPLAIN output, got {:?}", other),
         }
     }
 
-    pub fn explain_analyze(&self, sql: &str) -> String {
+    pub fn explain_analyze(&mut self, sql: &str) -> String {
         match self.db.query(&format!("EXPLAIN ANALYZE {sql}")) {
             QueryResult::Explain(s) => s,
             other => panic!("Expected EXPLAIN ANALYZE output, got {:?}", other),

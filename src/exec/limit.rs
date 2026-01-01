@@ -1,7 +1,4 @@
-use crate::{
-    exec::operator::{Operator, Row},
-    storage::page::StorageRow,
-};
+use crate::exec::operator::{Operator, Row};
 
 pub struct LimitExec {
     input: Box<dyn Operator>,
@@ -46,38 +43,39 @@ impl Operator for LimitExec {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
+    use crate::buffer::buffer_pool::BufferPool;
     use crate::common::value::Value;
     use crate::exec::limit::LimitExec;
     use crate::exec::operator::Operator;
     use crate::exec::scan::ScanExec;
-    use crate::storage::in_memory::InMemoryTable;
     use crate::storage::page::{PageId, RowId, StorageRow};
+    use crate::storage::page_manager::FilePageManager;
+    use crate::storage::table::{HeapTable, Table};
 
-    fn rows(vals: &[i64]) -> Vec<StorageRow> {
+    fn rows(vals: &[i64]) -> Vec<Vec<Value>> {
         vals.iter()
             .enumerate()
-            .map(|(i, v)| StorageRow {
-                rid: RowId {
-                    page_id: PageId(0),
-                    slot_id: i as u16,
-                },
-                values: vec![Value::Int64(*v)],
-            })
+            .map(|(_, v)| vec![Value::Int64(*v)])
             .collect()
     }
 
     #[test]
     fn limit_returns_only_n_rows() {
         let schema = vec!["x".into()];
-        let table = Arc::new(InMemoryTable::new(
-            "t".into(),
-            schema.clone(),
-            rows(&[1, 2, 3]),
-        ));
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
 
-        let scan = ScanExec::new(table, "t".into(), schema);
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        // -------- create table --------
+        let mut table = HeapTable::new("users".into(), schema.clone(), 4, bp.clone());
+
+        table.insert_rows(rows(&[1, 2, 3]));
+
+        let scan = ScanExec::new(Arc::new(table), "t".into(), schema);
         let mut limit = LimitExec::new(Box::new(scan), 2);
 
         limit.open();
@@ -90,9 +88,18 @@ mod tests {
     #[test]
     fn limit_zero_returns_no_rows() {
         let schema = vec!["x".into()];
-        let table = Arc::new(InMemoryTable::new("t".into(), schema.clone(), rows(&[1])));
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
 
-        let scan = ScanExec::new(table, "t".into(), schema);
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        // -------- create table --------
+        let mut table = HeapTable::new("users".into(), schema.clone(), 4, bp.clone());
+
+        table.insert_rows(rows(&[1]));
+
+        let scan = ScanExec::new(Arc::new(table), "t".into(), schema);
         let mut limit = LimitExec::new(Box::new(scan), 0);
 
         limit.open();
@@ -102,13 +109,17 @@ mod tests {
     #[test]
     fn limit_does_not_consume_extra_rows() {
         let schema = vec!["x".into()];
-        let table = Arc::new(InMemoryTable::new(
-            "t".into(),
-            schema.clone(),
-            rows(&[1, 2]),
-        ));
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
 
-        let scan = ScanExec::new(table, "t".into(), schema);
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        // -------- create table --------
+        let mut table = HeapTable::new("users".into(), schema.clone(), 4, bp.clone());
+
+        table.insert(vec![Value::Int64(1)]);
+        let scan = ScanExec::new(Arc::new(table), "t".into(), schema);
         let mut limit = LimitExec::new(Box::new(scan), 1);
 
         limit.open();
@@ -121,13 +132,18 @@ mod tests {
     #[test]
     fn limit_resets_on_open() {
         let schema = vec!["x".into()];
-        let table = Arc::new(InMemoryTable::new(
-            "t".into(),
-            schema.clone(),
-            rows(&[1, 2]),
-        ));
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
 
-        let scan = ScanExec::new(table, "t".into(), schema);
+        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path).unwrap(),
+        ))));
+
+        // -------- create table --------
+        let mut table = HeapTable::new("users".into(), schema.clone(), 4, bp.clone());
+
+        table.insert_rows(rows(&[1, 2]));
+
+        let scan = ScanExec::new(Arc::new(table), "t".into(), schema);
         let mut limit = LimitExec::new(Box::new(scan), 1);
 
         limit.open();

@@ -43,9 +43,9 @@ pub enum BinaryOp {
     Eq,
     Neq,
     Lt,
-    Le,
+    Lte,
     Gt,
-    Ge,
+    Gte,
 
     And,
     Or,

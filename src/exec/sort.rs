@@ -66,39 +66,3 @@ fn compare_rows(a: &Row, b: &Row, keys: &[(Expr, bool)]) -> std::cmp::Ordering {
     }
     std::cmp::Ordering::Equal
 }
-
-#[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use super::*;
-    use crate::buffer::buffer_pool::BufferPool;
-    use crate::common::value::Value;
-    use crate::exec::operator::Operator;
-    use crate::exec::scan::ScanExec;
-    use crate::ir::expr::Expr;
-    use crate::storage::page_manager::FilePageManager;
-    use crate::storage::table::HeapTable;
-
-    #[test]
-    fn sort_orders_rows() {
-        let schema = vec!["age".into()];
-        let rows = vec![vec![Value::Int64(30)], vec![Value::Int64(10)]];
-
-        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
-        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
-        ))));
-
-        let mut table = HeapTable::new("t".into(), schema.clone(), 4, bp);
-        table.insert_rows(rows);
-
-        let scan = ScanExec::new(Arc::new(table), "t".into(), schema);
-        let mut sort = SortExec::new(Box::new(scan), vec![(Expr::bound_col("t", "age"), true)]);
-
-        sort.open();
-        let first = sort.next().unwrap();
-
-        assert_eq!(first.get("t.age"), Some(&Value::Int64(10)));
-    }
-}

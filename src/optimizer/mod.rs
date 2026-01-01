@@ -2,6 +2,7 @@ pub mod constant_fold;
 pub mod index_selection;
 pub mod predicate_pushdown;
 pub mod projection_prune;
+pub mod unit_tests;
 
 use crate::exec::catalog::Catalog;
 use crate::ir::plan::LogicalPlan;

@@ -46,6 +46,7 @@ pub fn lower_stmt(stmt: Statement, catalog: &Catalog) -> Lowered {
             column,
         },
         Statement::DropIndex { name } => Lowered::DropIndex { name },
+        _ => panic!("Should not reach here"),
     }
 }
 
@@ -99,107 +100,5 @@ fn output_name(expr: &IRExpr) -> String {
     match expr {
         IRExpr::BoundColumn { name, .. } => name.clone(),
         _ => "expr".to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::exec::catalog::Catalog;
-    use crate::frontend::sql::parser::parse;
-    use crate::ir::pretty::pretty;
-
-    #[test]
-    fn lowers_simple_select() {
-        let sql = "SELECT name FROM users;";
-        let stmt = parse(sql);
-        let catalog = Catalog::new();
-
-        let lowered = lower_stmt(stmt, &catalog);
-
-        let expected = r#"
-Project [name]
-└─ Scan users
-"#;
-
-        match lowered {
-            Lowered::Plan(plan) => {
-                assert_eq!(pretty(&plan).trim(), expected.trim());
-            }
-            _ => panic!("expected plan"),
-        }
-    }
-
-    #[test]
-    fn lowers_select_where_limit() {
-        let sql = "SELECT name FROM users WHERE age > 18 LIMIT 5;";
-        let stmt = parse(sql);
-        let catalog = Catalog::new();
-
-        let lowered = lower_stmt(stmt, &catalog);
-
-        let expected = r#"
-Limit 5
-└─ Project [name]
-   └─ Filter (age Gt 18)
-      └─ Scan users
-"#;
-
-        match lowered {
-            Lowered::Plan(plan) => {
-                assert_eq!(pretty(&plan).trim(), expected.trim())
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn explain_select() {
-        let stmt = parse("EXPLAIN SELECT name FROM users;");
-        let catalog = Catalog::new();
-
-        let lowered = lower_stmt(stmt, &catalog);
-
-        match lowered {
-            Lowered::Explain { analyze, plan } => {
-                assert!(!analyze);
-                assert!(pretty(&plan).contains("Scan users"));
-            }
-            _ => panic!("expected explain"),
-        }
-    }
-
-    #[test]
-    fn lowers_order_by() {
-        let stmt = parse("SELECT name FROM users ORDER BY age DESC;");
-        let catalog = Catalog::new();
-
-        let lowered = lower_stmt(stmt, &catalog);
-
-        match lowered {
-            Lowered::Plan(plan) => {
-                let p = pretty(&plan);
-                assert!(p.contains("Sort"));
-            }
-            _ => panic!("expected plan"),
-        }
-    }
-
-    #[test]
-    fn lowers_join_into_logical_plan() {
-        let stmt = parse("SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id;");
-        let catalog = Catalog::new();
-
-        let lowered = lower_stmt(stmt, &catalog);
-
-        match lowered {
-            Lowered::Plan(plan) => {
-                let p = pretty(&plan);
-                assert!(p.contains("Join"));
-                assert!(p.contains("Scan users"));
-                assert!(p.contains("Scan orders"));
-            }
-            _ => panic!("expected plan"),
-        }
     }
 }

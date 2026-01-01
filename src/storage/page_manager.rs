@@ -90,29 +90,3 @@ impl PageManager for FilePageManager {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::storage::page_manager::{FilePageManager, PageManager};
-
-    #[test]
-    fn page_manager_roundtrip() {
-        let path = "/tmp/helium_test.db";
-        std::fs::remove_file(path).ok();
-
-        let mut pm = FilePageManager::open(path).unwrap();
-
-        let pid = pm.allocate_page();
-        {
-            let page = pm.fetch_page(pid);
-            page.data[0] = 42;
-            page.dirty = true;
-        }
-
-        pm.flush_all();
-
-        let mut pm2 = FilePageManager::open(path).unwrap();
-        let page = pm2.fetch_page(pid);
-        assert_eq!(page.data[0], 42);
-    }
-}

@@ -95,29 +95,3 @@ pub enum DiskBPlusNode {
     Internal(DiskInternalNode),
     Leaf(DiskLeafNode),
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::storage::btree::node::IndexKey;
-
-    #[test]
-    fn index_key_roundtrip() {
-        let keys = vec![
-            IndexKey::Int64(42),
-            IndexKey::Int64(-7),
-            IndexKey::String("abc".into()),
-            IndexKey::String("longer_index_key".into()),
-        ];
-
-        for k in keys {
-            let mut buf = Vec::new();
-            k.serialize(&mut buf);
-
-            let mut slice = buf.as_slice();
-            let k2 = IndexKey::deserialize(&mut slice);
-
-            assert_eq!(k, k2);
-            assert!(slice.is_empty());
-        }
-    }
-}

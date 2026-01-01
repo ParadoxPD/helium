@@ -3,6 +3,12 @@ use crate::common::value::Value;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     Select(SelectStmt),
+    Insert(InsertStmt),
+    Delete(DeleteStmt),
+    Update(UpdateStmt),
+
+    CreateTable(CreateTableStmt),
+    DropTable(DropTableStmt),
     Explain {
         analyze: bool,
         stmt: Box<Statement>,
@@ -24,6 +30,50 @@ pub struct SelectStmt {
     pub where_clause: Option<Expr>,
     pub order_by: Vec<OrderByExpr>,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateTableStmt {
+    pub table_name: String,
+    pub columns: Vec<ColumnDef>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnDef {
+    pub name: String,
+    pub ty: SqlType,
+    pub nullable: bool, // default = true
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SqlType {
+    Int,
+    Bool,
+    Text,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropTableStmt {
+    pub table_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateStmt {
+    pub table: String,
+    pub assignments: Vec<(String, Expr)>,
+    pub where_clause: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InsertStmt {
+    pub table: String,
+    pub values: Vec<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeleteStmt {
+    pub table: String,
+    pub where_clause: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

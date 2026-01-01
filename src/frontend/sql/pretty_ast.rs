@@ -39,6 +39,8 @@ fn pretty_stmt(stmt: &Statement, depth: usize, out: &mut String) {
         Statement::DropIndex { name } => {
             out.push_str(&format!("{}DropIndex {}\n", indent(depth), name));
         }
+
+        other => println!("{:?}", other),
     }
 }
 

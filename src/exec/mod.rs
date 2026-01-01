@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod delete;
 pub mod expr_eval;
 pub mod filter;
 pub mod index_scan;
@@ -8,10 +9,14 @@ pub mod operator;
 pub mod project;
 pub mod scan;
 pub mod sort;
+pub mod statement;
+pub mod unit_tests;
+pub mod update;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::api::db::QueryResult;
 use crate::exec::catalog::Catalog;
 use crate::exec::filter::FilterExec;
 use crate::exec::index_scan::IndexScanExec;
@@ -21,15 +26,19 @@ use crate::exec::operator::Operator;
 use crate::exec::project::ProjectExec;
 use crate::exec::scan::ScanExec;
 use crate::exec::sort::SortExec;
+use crate::frontend::sql::ast::Statement;
 use crate::ir::plan::LogicalPlan;
 use crate::storage::btree::node::Index;
+use crate::storage::page::StorageRow;
 use crate::storage::table::Table;
 
 pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
     match plan {
         LogicalPlan::Scan(scan) => {
-            let table = catalog.get(&scan.table).expect("table not found");
-            let scan_exec = ScanExec::new(table.clone(), scan.alias.clone(), scan.columns.clone());
+            let table = catalog.get_table(&scan.table).expect("table not found");
+
+            let scan_exec =
+                ScanExec::new(table.heap.clone(), scan.alias.clone(), scan.columns.clone());
             Box::new(scan_exec)
         }
 
@@ -59,7 +68,7 @@ pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
             Box::new(JoinExec::new(left, right, join.on.clone()))
         }
         LogicalPlan::IndexScan(scan) => {
-            let table = catalog.get(&scan.table).unwrap().clone();
+            let table = catalog.get_table(&scan.table).unwrap().clone();
 
             let index = catalog
                 .get_index(&scan.table, &scan.column)
@@ -67,171 +76,60 @@ pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
                 .clone();
 
             Box::new(IndexScanExec::new(
-                table.clone(),
-                scan.table.clone(),
+                table.heap.clone(),
+                table.name.clone(),
                 index,
                 scan.predicate.clone(),
                 scan.column.clone(),
-                table.schema().to_vec(),
+                table.heap.schema().to_vec(),
             ))
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use super::*;
-    use crate::buffer::buffer_pool::BufferPool;
-    use crate::common::value::Value;
-    use crate::exec::operator::Operator;
-    use crate::ir::expr::{BinaryOp, Expr};
-    use crate::ir::plan::{IndexPredicate, LogicalPlan};
-    use crate::storage::btree::DiskBPlusTree;
-    use crate::storage::btree::node::IndexKey;
-    use crate::storage::page_manager::FilePageManager;
-    use crate::storage::table::HeapTable;
-
-    #[test]
-    fn execute_simple_scan() {
-        let schema = vec!["id confirmed".into(), "name".into(), "age".into()];
-
-        let rows = vec![
-            vec![Value::Int64(1), Value::Null, Value::Null],
-            vec![Value::Int64(2), Value::Null, Value::Null],
-        ];
-
-        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
-        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
-        ))));
-
-        let mut table = HeapTable::new("users".into(), schema.clone(), 4, bp.clone());
-        table.insert_rows(rows);
-
-        let mut catalog = Catalog::new();
-        catalog.insert("users".into(), Arc::new(table));
-
-        let plan = LogicalPlan::scan("users", "u");
-        let mut exec = lower(&plan, &catalog);
-
-        exec.open();
-        assert!(exec.next().is_some());
-        assert!(exec.next().is_some());
-        assert!(exec.next().is_none());
-    }
-
-    #[test]
-    fn execute_filter_project_limit() {
-        let schema = vec!["name".into(), "age".into()];
-
-        let rows = vec![
-            vec![Value::String("Alice".into()), Value::Int64(30)],
-            vec![Value::String("Bob".into()), Value::Int64(15)],
-            vec![Value::String("Carol".into()), Value::Int64(40)],
-        ];
-
-        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
-        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
-        ))));
-
-        let mut table = HeapTable::new("users".into(), schema.clone(), 4, bp.clone());
-        table.insert_rows(rows);
-
-        let mut catalog = Catalog::new();
-        catalog.insert("users".into(), Arc::new(table));
-
-        let plan = LogicalPlan::scan("users", "u")
-            .filter(Expr::bin(
-                Expr::bound_col("u", "age"),
-                BinaryOp::Gt,
-                Expr::lit(Value::Int64(18)),
-            ))
-            .project(vec![(Expr::bound_col("u", "name"), "name")])
-            .limit(2);
-
-        let mut exec = lower(&plan, &catalog);
-        exec.open();
-
-        let r1 = exec.next().unwrap();
-        let r2 = exec.next().unwrap();
-
-        assert_eq!(r1.get("name"), Some(&Value::String("Alice".into())));
-        assert_eq!(r2.get("name"), Some(&Value::String("Carol".into())));
-        assert!(exec.next().is_none());
-    }
-
-    #[test]
-    fn execution_respects_optimizer_output() {
-        let schema = vec!["x".into()];
-
-        let rows = vec![
-            vec![Value::Int64(1)],
-            vec![Value::Int64(2)],
-            vec![Value::Int64(3)],
-        ];
-
-        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
-        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
-        ))));
-
-        let mut table = HeapTable::new("users".into(), schema.clone(), 4, bp.clone());
-        table.insert_rows(rows);
-
-        let mut catalog = Catalog::new();
-        catalog.insert("users".into(), Arc::new(table));
-
-        let plan = LogicalPlan::scan("users", "u")
-            .filter(Expr::bin(
-                Expr::bound_col("u", "x"),
-                BinaryOp::Gt,
-                Expr::lit(Value::Int64(1)),
-            ))
-            .limit(1);
-
-        let mut exec = lower(&plan, &catalog);
-        exec.open();
-
-        let row = exec.next().unwrap();
-        assert_eq!(row.get("u.x"), Some(&Value::Int64(2)));
-        assert!(exec.next().is_none());
-    }
-
-    #[test]
-    fn index_scan_end_to_end() {
-        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
-
-        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
-        ))));
-
-        let mut table = HeapTable::new("t".into(), vec!["id".into()], 4, bp.clone());
-        let mut index = DiskBPlusTree::new(4, bp.clone());
-
-        for i in 0..10 {
-            let rid = table.insert(vec![Value::Int64(i)]);
-            index.insert(IndexKey::Int64(i), rid);
+pub fn execute_statement(stmt: Statement, catalog: &mut Catalog) -> QueryResult {
+    match stmt {
+        Statement::CreateTable(stmt) => {
+            let bound = binder.bind_create_table(stmt)?;
+            catalog.create_table(bound.table, bound.schema)?;
+            QueryResult::Empty
         }
 
-        let table = Arc::new(table);
-        let index = Arc::new(Mutex::new(index));
+        Statement::DropTable(stmt) => {
+            let bound = binder.bind_drop_table(stmt)?;
+            catalog.drop_table(&bound.table)?;
+            QueryResult::Empty
+        }
 
-        let mut exec = IndexScanExec::new(
-            table.clone(),
-            "t".into(),
-            index,
-            IndexPredicate::Eq(Value::Int64(5)),
-            "id".into(),
-            table.schema().to_vec(),
-        );
+        Statement::Insert(stmt) => {
+            let bound = binder.bind_insert(stmt)?;
+            let table = catalog.get_table_mut(&bound.table)?;
+            let mut row = StorageRow::new();
+            for expr in bound.values {
+                row.push(expr.eval_const()?);
+            }
+            table.heap.insert(row);
+            QueryResult::Empty
+        }
 
-        exec.open();
-        let row = exec.next().unwrap();
+        Statement::Delete(stmt) => {
+            let bound = binder.bind_delete(stmt)?;
+            let plan = build_delete_plan(bound, catalog)?;
+            execute_plan(plan)
+        }
 
-        assert_eq!(row.get("t.id"), Some(&Value::Int64(5)));
-        assert!(exec.next().is_none());
+        Statement::Update(stmt) => {
+            let bound = binder.bind_update(stmt)?;
+            let plan = build_update_plan(bound, catalog)?;
+            execute_plan(plan)
+        }
+
+        // SELECT and EXPLAIN go through lowering
+        s @ Statement::Select(_) | s @ Statement::Explain { .. } => {
+            let lowered = lower_stmt(s, catalog);
+            execute_lowered(lowered, catalog)
+        }
+
+        _ => unreachable!(),
     }
 }

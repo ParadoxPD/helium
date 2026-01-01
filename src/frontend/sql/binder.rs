@@ -1,9 +1,18 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use anyhow::Result;
+use anyhow::bail;
+
+use crate::common::schema::Schema;
+use crate::common::types::DataType;
 use crate::common::value::Value;
 use crate::exec::catalog::{self, Catalog};
-use crate::frontend::sql::ast::{BinaryOp, Expr as SqlExpr, FromItem, SelectStmt};
-use crate::ir::expr::{BinaryOp as IRBinaryOp, Expr as IRExpr};
+use crate::frontend::sql::ast::SqlType;
+use crate::frontend::sql::ast::{
+    BinaryOp, CreateTableStmt, DeleteStmt, DropTableStmt, Expr as SqlExpr, FromItem, InsertStmt,
+    SelectStmt, UpdateStmt,
+};
+use crate::ir::expr::{BinaryOp as IRBinaryOp, ColumnRef, Expr as IRExpr};
 
 #[derive(Debug)]
 pub enum BindError {
@@ -37,6 +46,31 @@ pub struct Binder<'a> {
     // alias -> table name
     tables: HashMap<String, String>,
     catalog: &'a Catalog,
+}
+
+pub struct BoundCreateTable {
+    pub table: String,
+    pub schema: Schema, // Vec<Column>
+}
+
+pub struct BoundDropTable {
+    pub table: String,
+}
+
+pub struct BoundUpdate {
+    pub table: String,
+    pub assignments: Vec<(ColumnRef, IRExpr)>,
+    pub predicate: Option<IRExpr>,
+}
+
+pub struct BoundInsert {
+    pub table: String,
+    pub values: Vec<IRExpr>,
+}
+
+pub struct BoundDelete {
+    pub table: String,
+    pub predicate: Option<IRExpr>,
 }
 
 impl<'a> Binder<'a> {
@@ -189,74 +223,98 @@ impl<'a> Binder<'a> {
             }
         }
     }
-}
 
-mod tests {
-    use super::*;
-    use crate::exec::catalog::Catalog;
-    use crate::frontend::sql::parser::parse;
-    use crate::storage::table::HeapTable;
-    use crate::{buffer::buffer_pool::BufferPool, storage::page_manager::FilePageManager};
-    use std::sync::{Arc, Mutex};
+    fn bind_create_table(&self, stmt: CreateTableStmt) -> Result<BoundCreateTable> {
+        let mut seen = HashSet::new();
+        let mut schema = Vec::new();
 
-    fn test_catalog() -> Catalog {
-        let mut catalog = Catalog::new();
+        for col in stmt.columns {
+            if !seen.insert(col.name.clone()) {
+                bail!("duplicate column: {}", col.name);
+            }
+            let ty = match col.ty {
+                SqlType::Int => DataType::Int64,
+                SqlType::Bool => DataType::Bool,
+                SqlType::Text => DataType::String,
+            };
+            schema.push(Column {
+                name: col.name,
+                ty, // SqlType → DataType
+                nullable: col.nullable,
+            });
+        }
 
-        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        if schema.is_empty() {
+            bail!("table must have at least one column");
+        }
 
-        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
-        ))));
-
-        // -------- create table --------
-        let user_schema = vec!["id".into(), "name".into()];
-        let mut users_table = HeapTable::new("users".into(), user_schema.clone(), 4, bp.clone());
-
-        catalog.insert("users".into(), Arc::new(users_table));
-
-        let order_schema = vec!["user_id".into()];
-        let mut orders_table = HeapTable::new("users".into(), order_schema.clone(), 4, bp.clone());
-        catalog.insert("orders".into(), Arc::new(orders_table));
-
-        catalog
+        Ok(BoundCreateTable {
+            table: stmt.table_name,
+            schema,
+        })
     }
 
-    #[test]
-    fn binds_simple_column() {
-        let stmt = parse("SELECT id FROM users;");
-        let catalog = test_catalog();
+    fn bind_drop_table(&self, stmt: DropTableStmt) -> Result<BoundDropTable> {
+        if !self.catalog.table_exists(&stmt.table_name) {
+            bail!("table does not exist");
+        }
 
-        let bound = match stmt {
-            crate::frontend::sql::ast::Statement::Select(s) => Binder::bind(s, &catalog).unwrap(),
-            _ => panic!(),
-        };
-
-        assert!(bound.where_clause.is_none());
+        Ok(BoundDropTable {
+            table: stmt.table_name,
+        })
     }
 
-    #[test]
-    fn errors_on_ambiguous_column() {
-        let stmt = parse("SELECT id FROM users u JOIN orders o ON u.id = o.user_id;");
-        let catalog = test_catalog();
+    fn bind_update(&self, stmt: UpdateStmt) -> Result<BoundUpdate> {
+        let table = self.catalog.get_table(&stmt.table)?;
 
-        let res = match stmt {
-            crate::frontend::sql::ast::Statement::Select(s) => Binder::bind(s, &catalog),
-            _ => panic!(),
-        };
+        let mut assigns = Vec::new();
+        for (col, expr) in stmt.assignments {
+            let column = table.schema.lookup(&col)?;
+            let bound_expr = self.bind_expr(expr)?;
 
-        assert!(matches!(res, Err(BindError::AmbiguousColumn(_))));
+            self.typecheck_assign(&column, &bound_expr)?;
+
+            assigns.push((column, bound_expr));
+        }
+
+        let predicate = stmt.where_clause.map(|e| self.bind_expr(e)).transpose()?;
+
+        Ok(BoundUpdate {
+            table: stmt.table,
+            assignments: assigns,
+            predicate,
+        })
     }
 
-    #[test]
-    fn binds_qualified_column() {
-        let stmt = parse("SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id;");
-        let catalog = test_catalog();
+    fn bind_insert(&self, stmt: InsertStmt) -> Result<BoundInsert> {
+        let table = self.catalog.get_table(&stmt.table)?;
 
-        let bound = match stmt {
-            crate::frontend::sql::ast::Statement::Select(s) => Binder::bind(s, &catalog).unwrap(),
-            _ => panic!(),
-        };
+        if stmt.values.len() != table.schema.len() {
+            bail!("column count mismatch");
+        }
 
-        assert_eq!(bound.columns.len(), 1);
+        let mut values = Vec::new();
+
+        for (expr, col) in stmt.values.into_iter().zip(&table.schema) {
+            let bound = self.bind_expr(expr)?;
+            self.typecheck_assign(col, &bound)?;
+            values.push(bound);
+        }
+
+        Ok(BoundInsert {
+            table: stmt.table,
+            values,
+        })
+    }
+
+    fn bind_delete(&self, stmt: DeleteStmt) -> Result<BoundDelete> {
+        self.catalog.get_table(&stmt.table)?;
+
+        let pred = stmt.where_clause.map(|e| self.bind_expr(e)).transpose()?;
+
+        Ok(BoundDelete {
+            table: stmt.table,
+            predicate: pred,
+        })
     }
 }

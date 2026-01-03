@@ -25,15 +25,19 @@ pub enum Lowered {
 pub fn lower_stmt(bound: BoundStatement) -> Lowered {
     match bound {
         BoundStatement::Select(s) => Lowered::Plan(lower_select(s)),
-
         BoundStatement::CreateIndex(ci) => Lowered::CreateIndex {
             name: ci.name,
             table: ci.table,
             column: ci.column,
         },
-
         BoundStatement::DropIndex(di) => Lowered::DropIndex { name: di.name },
-
+        BoundStatement::Explain { analyze, stmt } => match *stmt {
+            BoundStatement::Select(s) => Lowered::Explain {
+                analyze,
+                plan: lower_select(s),
+            },
+            _ => panic!("EXPLAIN only supported for SELECT"),
+        },
         _ => panic!("statement should not reach lowering"),
     }
 }

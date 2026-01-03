@@ -14,9 +14,9 @@ use crate::frontend::sql::ast::SqlType;
 use crate::frontend::sql::ast::Statement;
 use crate::frontend::sql::ast::{
     BinaryOp, CreateTableStmt, DeleteStmt, DropTableStmt, Expr as SqlExpr, FromItem, InsertStmt,
-    SelectStmt, UpdateStmt,
+    SelectStmt, UnaryOp, UpdateStmt,
 };
-use crate::ir::expr::{BinaryOp as IRBinaryOp, Expr as IRExpr};
+use crate::ir::expr::{BinaryOp as IRBinaryOp, Expr as IRExpr, UnaryOp as IRUnaryOp};
 
 use std::fmt;
 
@@ -96,7 +96,7 @@ pub struct BoundUpdate {
 #[derive(Debug)]
 pub struct BoundInsert {
     pub table: String,
-    pub values: Vec<IRExpr>,
+    pub rows: Vec<Vec<IRExpr>>,
 }
 
 #[derive(Debug)]
@@ -127,6 +127,11 @@ pub enum BoundStatement {
     DropTable(BoundDropTable),
     CreateIndex(BoundCreateIndex),
     DropIndex(BoundDropIndex),
+
+    Explain {
+        analyze: bool,
+        stmt: Box<BoundStatement>,
+    },
 }
 
 impl Binder {
@@ -153,7 +158,13 @@ impl Binder {
                 column,
             } => self.bind_create_index(name, table, column),
             Statement::DropIndex { name } => self.bind_drop_index(name),
-            Statement::Explain { analyze, stmt } => todo!(),
+            Statement::Explain { analyze, stmt } => {
+                let inner = self.bind_statement(*stmt)?;
+                Ok(BoundStatement::Explain {
+                    analyze,
+                    stmt: Box::new(inner),
+                })
+            }
         }
     }
 
@@ -287,9 +298,7 @@ impl Binder {
     pub fn bind_expr(&self, expr: SqlExpr) -> Result<IRExpr, BindError> {
         match expr {
             SqlExpr::Column { table, name } => self.bind_column(table, name),
-
             SqlExpr::Literal(v) => Ok(IRExpr::Literal(v)),
-
             SqlExpr::Binary { left, op, right } => {
                 let ir_op = match op {
                     BinaryOp::Eq => IRBinaryOp::Eq,
@@ -310,6 +319,16 @@ impl Binder {
                     left: Box::new(self.bind_expr(*left)?),
                     op: ir_op,
                     right: Box::new(self.bind_expr(*right)?),
+                })
+            }
+            SqlExpr::Unary { op, expr } => {
+                let ir_op = match op {
+                    UnaryOp::Not => IRUnaryOp::Not,
+                    UnaryOp::Minus => IRUnaryOp::Neg,
+                };
+                Ok(IRExpr::Unary {
+                    op: ir_op,
+                    expr: Box::new(self.bind_expr(*expr)?),
                 })
             }
         }
@@ -413,20 +432,24 @@ impl Binder {
             .get_table(&stmt.table)
             .ok_or_else(|| BindError::UnknownTable(stmt.table.clone()))?;
 
-        if stmt.values.len() != table.schema.columns.len() {
-            return Err(BindError::ColumnCountMismatch);
-        }
+        let mut bound_rows = Vec::new();
+        for row in stmt.rows {
+            if row.len() != table.schema.columns.len() {
+                return Err(BindError::ColumnCountMismatch);
+            }
 
-        let mut values = Vec::new();
+            let mut values = Vec::new();
 
-        for (expr, col) in stmt.values.into_iter().zip(&table.schema.columns) {
-            let bound = self.bind_expr(expr)?;
-            values.push(bound);
+            for (expr, col) in row.into_iter().zip(&table.schema.columns) {
+                let bound = self.bind_expr(expr)?;
+                values.push(bound);
+            }
+            bound_rows.push(values);
         }
 
         Ok(BoundInsert {
             table: stmt.table,
-            values,
+            rows: bound_rows,
         })
     }
 

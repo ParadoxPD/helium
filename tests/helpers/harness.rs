@@ -1,8 +1,6 @@
 use helium::api::db::{Database, QueryResult};
 use helium::exec::operator::Row;
 
-use helium::frontend::sql::{binder::Binder, parser::parse};
-
 pub struct TestDB {
     pub db: Database,
 }

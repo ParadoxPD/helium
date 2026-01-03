@@ -1,409 +1,572 @@
-use crate::common::value::Value;
+use crate::{
+    common::value::Value,
+    frontend::sql::lexer::{Token, Tokenizer},
+};
 
 use super::ast::*;
 
-pub fn parse(sql: &str) -> Result<Statement, ParseError> {
-    let sql = sql.trim().trim_end_matches(';');
-    let mut parts = sql.split_whitespace().peekable();
-
-    match parts.peek() {
-        Some(&"EXPLAIN") => parse_explain(&mut parts),
-        Some(&"CREATE") => parse_create(&mut parts),
-        Some(&"DROP") => parse_drop(&mut parts),
-        Some(&"SELECT") => parse_select(&mut parts),
-        _ => return Err(ParseError::Unsupported(sql.to_string())),
-    }
+pub struct Parser {
+    tokens: Vec<Token>,
+    pos: usize,
 }
 
-fn parse_explain<'a, I>(parts: &mut std::iter::Peekable<I>) -> Result<Statement, ParseError>
-where
-    I: Iterator<Item = &'a str>,
-{
-    parts.next(); // EXPLAIN
-
-    let analyze = matches!(parts.peek(), Some(&"ANALYZE"));
-    if analyze {
-        parts.next();
-    }
-
-    let rest = parts.collect::<Vec<_>>().join(" ");
-    Ok(Statement::Explain {
-        analyze,
-        stmt: Box::new(parse(&rest)?),
-    })
-}
-
-fn parse_create<'a, I>(parts: &mut std::iter::Peekable<I>) -> Result<Statement, ParseError>
-where
-    I: Iterator<Item = &'a str>,
-{
-    parts.next(); // CREATE
-
-    match parts.next() {
-        Some("TABLE") => parse_create_table(parts),
-        Some("INDEX") => parse_create_index(parts),
-        other => {
-            return Err(ParseError::Expected {
-                expected: "TABLE or INDEX".into(),
-                found: other.map(|s| s.to_string()),
-            });
-        }
-    }
-}
-
-fn parse_drop<'a, I>(parts: &mut std::iter::Peekable<I>) -> Result<Statement, ParseError>
-where
-    I: Iterator<Item = &'a str>,
-{
-    parts.next(); // DROP
-
-    match parts.next() {
-        Some("TABLE") => {
-            let name = parts.next().ok_or(ParseError::UnexpectedEOF)?.to_string();
-
-            Ok(Statement::DropTable(DropTableStmt { table_name: name }))
-        }
-        Some("INDEX") => {
-            let name = parts.next().ok_or(ParseError::UnexpectedEOF)?.to_string();
-
-            Ok(Statement::DropIndex { name })
-        }
-        other => {
-            return Err(ParseError::Expected {
-                expected: "TABLE or INDEX".into(),
-                found: other.map(|s| s.to_string()),
-            });
-        }
-    }
-}
-
-fn parse_create_index<'a, I>(parts: &mut std::iter::Peekable<I>) -> Result<Statement, ParseError>
-where
-    I: Iterator<Item = &'a str>,
-{
-    let name = parts.next().ok_or(ParseError::UnexpectedEOF)?.to_string();
-
-    let on_token = parts.next();
-    if on_token != Some("ON") {
-        return Err(ParseError::Expected {
-            expected: "ON".into(),
-            found: on_token.map(|s| s.to_string()),
-        });
-    }
-
-    let table = parts.next().ok_or(ParseError::UnexpectedEOF)?.to_string();
-    let col = parts
-        .next()
-        .ok_or(ParseError::UnexpectedEOF)?
-        .trim_start_matches('(')
-        .trim_end_matches(')')
-        .to_string();
-
-    Ok(Statement::CreateIndex {
-        name,
-        table,
-        column: col,
-    })
-}
-
-fn parse_create_table<'a, I>(parts: &mut std::iter::Peekable<I>) -> Result<Statement, ParseError>
-where
-    I: Iterator<Item = &'a str>,
-{
-    let table_name = parts.next().ok_or(ParseError::UnexpectedEOF)?.to_string();
-
-    let mut columns = Vec::new();
-
-    // Expect opening "(" (may be attached to identifier)
-    let first = parts.next().ok_or(ParseError::UnexpectedEOF)?;
-    let mut token = first.trim_start_matches('(').to_string();
-
-    loop {
-        // Column name (strip trailing comma or paren)
-        let col_name = token
-            .trim_end_matches(',')
-            .trim_end_matches(')')
-            .to_string();
-
-        // Column type
-        let ty_token = parts.next().ok_or(ParseError::UnexpectedEOF)?;
-        let ty_str = ty_token.trim_end_matches(',').trim_end_matches(')');
-
-        let ty = match ty_str {
-            "INT" | "INTEGER" => SqlType::Int,
-            "BOOL" | "BOOLEAN" => SqlType::Bool,
-            "TEXT" | "STRING" => SqlType::Text,
-            other => {
-                return Err(ParseError::Unsupported(other.into()));
-            }
-        };
-
-        // Check if we hit the closing paren
-        let mut has_close_paren = ty_token.ends_with(')');
-
-        // Optional NULL / NOT NULL
-        let mut nullable = true;
-        if !has_close_paren {
-            if let Some(&next) = parts.peek() {
-                let next_clean = next.trim_end_matches(',').trim_end_matches(')');
-                match next_clean {
-                    "NOT" => {
-                        parts.next(); // NOT
-                        let null_token = parts.next().ok_or(ParseError::UnexpectedEOF)?;
-                        if !null_token.starts_with("NULL") {
-                            return Err(ParseError::Expected {
-                                expected: "NULL".into(),
-                                found: Some(null_token.to_string()),
-                            });
-                        }
-                        nullable = false;
-                        if null_token.ends_with(')') {
-                            has_close_paren = true;
-                        }
-                    }
-                    "NULL" => {
-                        let null_token = parts.next().ok_or(ParseError::UnexpectedEOF)?;
-                        nullable = true;
-                        if null_token.ends_with(')') {
-                            has_close_paren = true;
-                        }
-                    }
-                    _ => {
-                        if next.ends_with(')') {
-                            has_close_paren = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        columns.push(ColumnDef {
-            name: col_name,
-            ty,
-            nullable,
-        });
-
-        // If we found closing paren, we're done
-        if has_close_paren {
-            break;
-        }
-
-        // Look for comma or next token
-        match parts.peek() {
-            Some(&tok) if tok.starts_with(')') || tok == ")" => {
-                parts.next();
+impl Parser {
+    pub fn new(input: &str) -> Self {
+        let mut t = Tokenizer::new(input);
+        let mut tokens = Vec::new();
+        loop {
+            let tok = t.next_token();
+            tokens.push(tok.clone());
+            if tok == Token::EOF {
                 break;
             }
-            Some(&tok) if tok == "," => {
-                parts.next(); // consume comma
-                token = parts.next().ok_or(ParseError::UnexpectedEOF)?.to_string();
-            }
-            Some(_) => {
-                token = parts.next().ok_or(ParseError::UnexpectedEOF)?.to_string();
-            }
-            None => break,
+        }
+
+        Self { tokens, pos: 0 }
+    }
+
+    fn peek(&self) -> &Token {
+        &self.tokens[self.pos]
+    }
+
+    fn next(&mut self) -> &Token {
+        let tok = &self.tokens[self.pos];
+        self.pos += 1;
+        tok
+    }
+
+    fn expect(&mut self, expected: Token) -> Result<(), ParseError> {
+        let tok = self.next().clone();
+        if tok == expected {
+            Ok(())
+        } else {
+            Err(ParseError::UnexpectedToken(tok))
         }
     }
 
-    Ok(Statement::CreateTable(CreateTableStmt {
-        table_name,
-        columns,
-    }))
-}
-
-pub fn parse_select<'a, I>(parts: &mut std::iter::Peekable<I>) -> Result<Statement, ParseError>
-where
-    I: Iterator<Item = &'a str>,
-{
-    parts.next(); // SELECT
-
-    let mut columns = Vec::new();
-    while let Some(&tok) = parts.peek() {
-        if tok == "FROM" {
-            break;
+    fn expect_ident(&mut self) -> Result<String, ParseError> {
+        match self.next() {
+            Token::Ident(s) => Ok(s.clone()),
+            t => Err(ParseError::UnexpectedToken(t.clone())),
         }
-        let tok = parts.next().unwrap().trim_end_matches(',');
-        columns.push(parse_column(tok));
     }
 
-    if parts.next() != Some("FROM") {
-        return Err(ParseError::Expected {
-            expected: "FROM".into(),
-            found: parts.peek().map(|s| s.to_string()),
-        });
+    fn match_keyword(&mut self, kw: &str) -> bool {
+        matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case(kw))
     }
 
-    let mut from = parse_table(parts)?;
+    fn consume_keyword(&mut self, kw: &str) -> Result<(), ParseError> {
+        if self.match_keyword(kw) {
+            self.next();
+            Ok(())
+        } else {
+            Err(ParseError::Message(format!("expected keyword {}", kw)))
+        }
+    }
 
-    while parts.peek() == Some(&"JOIN") {
-        parts.next(); // JOIN
-        let right = parse_table(parts)?;
+    pub fn parse_statement(&mut self) -> Result<Statement, ParseError> {
+        match self.peek() {
+            Token::Ident(s) if s.eq_ignore_ascii_case("SELECT") => {
+                self.next();
+                Ok(Statement::Select(self.parse_select()?))
+            }
 
-        if parts.next() != Some("ON") {
-            return Err(ParseError::Expected {
-                expected: "ON".into(),
-                found: parts.peek().map(|s| s.to_string()),
+            Token::Ident(s) if s.eq_ignore_ascii_case("EXPLAIN") => {
+                self.next();
+                let analyze = if self.match_keyword("ANALYZE") {
+                    self.next();
+                    true
+                } else {
+                    false
+                };
+                let stmt = Box::new(self.parse_statement()?);
+                Ok(Statement::Explain { analyze, stmt })
+            }
+
+            Token::Ident(s) if s.eq_ignore_ascii_case("CREATE") => {
+                self.next();
+                if self.match_keyword("TABLE") {
+                    self.next();
+                    Ok(Statement::CreateTable(self.parse_create_table()?))
+                } else if self.match_keyword("INDEX") {
+                    self.next();
+                    Ok(self.parse_create_index()?)
+                } else {
+                    Err(ParseError::Message("expected TABLE or INDEX".into()))
+                }
+            }
+
+            Token::Ident(s) if s.eq_ignore_ascii_case("DROP") => {
+                self.next();
+                if self.match_keyword("TABLE") {
+                    self.next();
+                    Ok(Statement::DropTable(self.parse_drop_table()?))
+                } else if self.match_keyword("INDEX") {
+                    self.next();
+                    Ok(self.parse_drop_index()?)
+                } else {
+                    Err(ParseError::Message("expected TABLE or INDEX".into()))
+                }
+            }
+
+            Token::Ident(s) if s.eq_ignore_ascii_case("INSERT") => {
+                self.next();
+                Ok(Statement::Insert(self.parse_insert()?))
+            }
+
+            Token::Ident(s) if s.eq_ignore_ascii_case("UPDATE") => {
+                self.next();
+                Ok(Statement::Update(self.parse_update()?))
+            }
+
+            Token::Ident(s) if s.eq_ignore_ascii_case("DELETE") => {
+                self.next();
+                Ok(Statement::Delete(self.parse_delete()?))
+            }
+
+            t => Err(ParseError::UnexpectedToken(t.clone())),
+        }
+    }
+    fn parse_select(&mut self) -> Result<SelectStmt, ParseError> {
+        let columns = self.parse_select_list()?;
+        self.consume_keyword("FROM")?;
+        let from = self.parse_from()?;
+
+        let where_clause = if self.match_keyword("WHERE") {
+            self.next();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
+        let order_by = if self.match_keyword("ORDER") {
+            self.next();
+            self.consume_keyword("BY")?;
+            self.parse_order_by()?
+        } else {
+            Vec::new()
+        };
+
+        let limit = if self.match_keyword("LIMIT") {
+            self.next();
+            match self.next() {
+                Token::Int(n) => Some(*n as usize),
+                t => return Err(ParseError::UnexpectedToken(t.clone())),
+            }
+        } else {
+            None
+        };
+
+        Ok(SelectStmt {
+            columns,
+            from,
+            where_clause,
+            order_by,
+            limit,
+        })
+    }
+    fn parse_order_by(&mut self) -> Result<Vec<OrderByExpr>, ParseError> {
+        let mut out = Vec::new();
+
+        loop {
+            let expr = self.parse_expr()?;
+            let asc = if self.match_keyword("DESC") {
+                self.next();
+                false
+            } else if self.match_keyword("ASC") {
+                self.next();
+                true
+            } else {
+                true
+            };
+
+            out.push(OrderByExpr { expr, asc });
+
+            if matches!(self.peek(), Token::Comma) {
+                self.next();
+            } else {
+                break;
+            }
+        }
+
+        Ok(out)
+    }
+    fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        self.parse_or()
+    }
+
+    fn parse_or(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_and()?;
+
+        while self.match_keyword("OR") {
+            self.next();
+            let right = self.parse_and()?;
+            left = Expr::Binary {
+                left: Box::new(left),
+                op: BinaryOp::Or,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(left)
+    }
+
+    fn parse_and(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_comparison()?;
+
+        while self.match_keyword("AND") {
+            self.next();
+            let right = self.parse_comparison()?;
+            left = Expr::Binary {
+                left: Box::new(left),
+                op: BinaryOp::And,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(left)
+    }
+
+    fn parse_arithmetic(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_term()?; // Changed from parse_primary
+
+        while matches!(self.peek(), Token::Plus | Token::Minus) {
+            let op = match self.next() {
+                Token::Plus => BinaryOp::Add,
+                Token::Minus => BinaryOp::Sub,
+                _ => unreachable!(),
+            };
+            let right = self.parse_term()?; // Changed from parse_primary
+            left = Expr::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(left)
+    }
+
+    // Add this new method:
+    fn parse_term(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_primary()?;
+
+        while matches!(self.peek(), Token::Star | Token::Slash) {
+            let op = match self.next() {
+                Token::Star => BinaryOp::Mul,
+                Token::Slash => BinaryOp::Div,
+                _ => unreachable!(),
+            };
+            let right = self.parse_primary()?;
+            left = Expr::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
+        }
+
+        Ok(left)
+    }
+    fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+        // Take ownership of the token FIRST
+        let tok = self.next().clone();
+
+        match tok {
+            Token::Ident(first) => {
+                if first.eq_ignore_ascii_case("NULL") {
+                    return Ok(Expr::Literal(Value::Null));
+                }
+
+                if first.eq_ignore_ascii_case("TRUE") {
+                    return Ok(Expr::Literal(Value::Bool(true)));
+                }
+                if first.eq_ignore_ascii_case("FALSE") {
+                    return Ok(Expr::Literal(Value::Bool(false)));
+                }
+
+                // Now it's safe to inspect / mutate self again
+                if matches!(self.peek(), Token::Dot) {
+                    self.next(); // consume '.'
+                    let second = self.expect_ident()?;
+
+                    Ok(Expr::Column {
+                        table: Some(first),
+                        name: second,
+                    })
+                } else {
+                    Ok(Expr::Column {
+                        table: None,
+                        name: first,
+                    })
+                }
+            }
+
+            Token::Int(n) => Ok(Expr::Literal(Value::Int64(n))),
+
+            Token::String(s) => Ok(Expr::Literal(Value::String(s))),
+
+            Token::LParen => {
+                let e = self.parse_expr()?;
+                self.expect(Token::RParen)?;
+                Ok(e)
+            }
+
+            t => Err(ParseError::UnexpectedToken(t)),
+        }
+    }
+
+    fn parse_create_index(&mut self) -> Result<Statement, ParseError> {
+        let name = self.expect_ident()?;
+        self.consume_keyword("ON")?;
+        let table = self.expect_ident()?;
+        self.expect(Token::LParen)?;
+        let column = self.expect_ident()?;
+        self.expect(Token::RParen)?;
+        Ok(Statement::CreateIndex {
+            name,
+            table,
+            column,
+        })
+    }
+
+    fn parse_drop_index(&mut self) -> Result<Statement, ParseError> {
+        let name = self.expect_ident()?;
+        Ok(Statement::DropIndex { name })
+    }
+
+    fn parse_select_list(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let mut cols = Vec::new();
+
+        loop {
+            match self.peek() {
+                Token::Star => {
+                    self.next();
+                    cols.push(Expr::Column {
+                        table: None,
+                        name: "*".into(),
+                    });
+                }
+                _ => {
+                    let expr = self.parse_expr()?;
+                    cols.push(expr);
+                }
+            }
+
+            if matches!(self.peek(), Token::Comma) {
+                self.next();
+            } else {
+                break;
+            }
+        }
+
+        Ok(cols)
+    }
+    fn parse_from(&mut self) -> Result<FromItem, ParseError> {
+        // 1. Parse the leftmost table
+        let mut left = self.parse_table_ref()?;
+
+        // 2. Parse zero or more JOIN clauses
+        loop {
+            if self.match_keyword("JOIN") {
+                self.next(); // consume JOIN
+
+                let right = self.parse_table_ref()?;
+
+                self.consume_keyword("ON")?;
+                let on = self.parse_expr()?;
+
+                left = FromItem::Join {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    on,
+                };
+            } else {
+                break;
+            }
+        }
+
+        Ok(left)
+    }
+
+    fn parse_create_table(&mut self) -> Result<CreateTableStmt, ParseError> {
+        let table_name = self.expect_ident()?;
+        self.expect(Token::LParen)?;
+
+        let mut columns = Vec::new();
+
+        loop {
+            let name = self.expect_ident()?;
+            let ty = self.expect_ident()?; // INT, TEXT, BOOL
+
+            let sql_ty = match ty.to_uppercase().as_str() {
+                "INT" => SqlType::Int,
+                "TEXT" => SqlType::Text,
+                "BOOL" => SqlType::Bool,
+                _ => return Err(ParseError::Message("unknown type".into())),
+            };
+
+            let mut nullable = true;
+            if self.match_keyword("NOT") {
+                self.next();
+                self.consume_keyword("NULL")?;
+                nullable = false;
+            } else if self.match_keyword("NULL") {
+                self.next();
+                nullable = true;
+            }
+
+            columns.push(ColumnDef {
+                name,
+                ty: sql_ty,
+                nullable,
+            });
+
+            if matches!(self.peek(), Token::Comma) {
+                self.next();
+            } else {
+                break;
+            }
+        }
+
+        self.expect(Token::RParen)?;
+
+        Ok(CreateTableStmt {
+            table_name,
+            columns,
+        })
+    }
+
+    fn parse_drop_table(&mut self) -> Result<DropTableStmt, ParseError> {
+        let table_name = self.expect_ident()?;
+        Ok(DropTableStmt { table_name })
+    }
+
+    fn parse_insert(&mut self) -> Result<InsertStmt, ParseError> {
+        self.consume_keyword("INTO")?;
+        let table = self.expect_ident()?;
+        self.consume_keyword("VALUES")?;
+
+        let mut rows = Vec::new();
+
+        loop {
+            self.expect(Token::LParen)?;
+            let mut values = Vec::new();
+
+            loop {
+                values.push(self.parse_expr()?);
+                if matches!(self.peek(), Token::Comma) {
+                    self.next();
+                } else {
+                    break;
+                }
+            }
+
+            self.expect(Token::RParen)?;
+            rows.push(values);
+
+            // Check for more rows
+            if matches!(self.peek(), Token::Comma) {
+                self.next();
+            } else {
+                break;
+            }
+        }
+
+        Ok(InsertStmt { table, rows }) // Change values to rows
+    }
+
+    fn parse_update(&mut self) -> Result<UpdateStmt, ParseError> {
+        let table = self.expect_ident()?;
+        self.consume_keyword("SET")?;
+
+        let mut assignments = Vec::new();
+
+        loop {
+            let col = self.expect_ident()?;
+            self.expect(Token::Eq)?;
+            let expr = self.parse_expr()?;
+
+            assignments.push((col, expr));
+
+            if matches!(self.peek(), Token::Comma) {
+                self.next();
+            } else {
+                break;
+            }
+        }
+
+        let where_clause = if self.match_keyword("WHERE") {
+            self.next();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
+        Ok(UpdateStmt {
+            table,
+            assignments,
+            where_clause,
+        })
+    }
+
+    fn parse_delete(&mut self) -> Result<DeleteStmt, ParseError> {
+        self.consume_keyword("FROM")?;
+        let table = self.expect_ident()?;
+
+        let where_clause = if self.match_keyword("WHERE") {
+            self.next();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
+        Ok(DeleteStmt {
+            table,
+            where_clause,
+        })
+    }
+
+    fn parse_table_ref(&mut self) -> Result<FromItem, ParseError> {
+        let name = self.expect_ident()?;
+
+        let alias = if matches!(self.peek(), Token::Ident(_)) {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+
+        Ok(FromItem::Table { name, alias })
+    }
+
+    fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
+        if self.match_keyword("NOT") {
+            self.next();
+            let expr = self.parse_comparison()?;
+            return Ok(Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(expr),
             });
         }
 
-        let on = parse_simple_predicate(parts)?;
+        let mut left = self.parse_arithmetic()?;
 
-        from = FromItem::Join {
-            left: Box::new(from),
-            right: Box::new(right),
-            on,
+        let op = match self.peek() {
+            Token::Eq => BinaryOp::Eq,
+            Token::NotEq => BinaryOp::Neq,
+            Token::Lt => BinaryOp::Lt,
+            Token::Le => BinaryOp::Lte,
+            Token::Gt => BinaryOp::Gt,
+            Token::Ge => BinaryOp::Gte,
+            _ => return Ok(left),
         };
-    }
 
-    let mut where_clause = None;
-    let mut order_by = Vec::new();
-    let mut limit = None;
+        self.next(); // consume operator
+        let right = self.parse_arithmetic()?;
 
-    while let Some(tok) = parts.next() {
-        match tok {
-            "WHERE" => {
-                let mut expr = parse_simple_predicate(parts)?;
-                while parts.peek() == Some(&"AND") {
-                    parts.next();
-                    let rhs = parse_simple_predicate(parts)?;
-                    expr = Expr::Binary {
-                        left: Box::new(expr),
-                        op: BinaryOp::And,
-                        right: Box::new(rhs),
-                    };
-                }
-                where_clause = Some(expr);
-            }
-
-            "ORDER" => {
-                if parts.next() != Some("BY") {
-                    return Err(ParseError::Expected {
-                        expected: "BY".into(),
-                        found: parts.peek().map(|s| s.to_string()),
-                    });
-                }
-
-                while let Some(&tok) = parts.peek() {
-                    if tok == "LIMIT" {
-                        break;
-                    }
-
-                    let col = parts.next().unwrap().trim_end_matches(',').to_string();
-                    let mut asc = true;
-
-                    if let Some(&"DESC") = parts.peek() {
-                        parts.next();
-                        asc = false;
-                    } else if let Some(&"ASC") = parts.peek() {
-                        parts.next();
-                    }
-
-                    order_by.push(OrderByExpr {
-                        expr: parse_column(&col),
-                        asc,
-                    });
-
-                    if !matches!(parts.peek(), Some(&",")) {
-                        if matches!(parts.peek(), Some(&"LIMIT") | None) {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            "LIMIT" => {
-                let limit_str = parts.next().ok_or(ParseError::UnexpectedEOF)?;
-                let limit_val = limit_str
-                    .parse::<usize>()
-                    .map_err(|_| ParseError::InvalidLiteral(limit_str.to_string()))?;
-                limit = Some(limit_val);
-            }
-
-            _ => {}
-        }
-    }
-
-    Ok(Statement::Select(SelectStmt {
-        columns,
-        from,
-        where_clause,
-        order_by,
-        limit,
-    }))
-}
-
-fn parse_simple_predicate<'a, I>(parts: &mut std::iter::Peekable<I>) -> Result<Expr, ParseError>
-where
-    I: Iterator<Item = &'a str>,
-{
-    let left = parse_column(parts.next().ok_or(ParseError::UnexpectedEOF)?);
-
-    let op_str = parts.next().ok_or(ParseError::UnexpectedEOF)?;
-    let op = match op_str {
-        "=" => BinaryOp::Eq,
-        "!=" => BinaryOp::Neq,
-        ">" => BinaryOp::Gt,
-        ">=" => BinaryOp::Gte,
-        "<" => BinaryOp::Lt,
-        "<=" => BinaryOp::Lte,
-        other => {
-            return Err(ParseError::Unsupported(other.to_string()));
-        }
-    };
-
-    let rhs = parts.next().ok_or(ParseError::UnexpectedEOF)?;
-
-    // Handle string literals
-    let right = if rhs.starts_with('\'') || rhs.starts_with('"') {
-        let s = rhs.trim_matches('\'').trim_matches('"').to_string();
-        Expr::Literal(Value::String(s))
-    } else if let Ok(v) = rhs.parse::<i64>() {
-        Expr::Literal(Value::Int64(v))
-    } else if let Ok(b) = rhs.parse::<bool>() {
-        Expr::Literal(Value::Bool(b))
-    } else {
-        parse_column(rhs)
-    };
-
-    Ok(Expr::Binary {
-        left: Box::new(left),
-        op,
-        right: Box::new(right),
-    })
-}
-
-fn parse_table<'a, I>(parts: &mut std::iter::Peekable<I>) -> Result<FromItem, ParseError>
-where
-    I: Iterator<Item = &'a str>,
-{
-    let name = parts.next().ok_or(ParseError::UnexpectedEOF)?.to_string();
-
-    let alias = match parts.peek() {
-        Some(&tok)
-            if tok != "JOIN"
-                && tok != "ON"
-                && tok != "WHERE"
-                && tok != "ORDER"
-                && tok != "LIMIT" =>
-        {
-            Some(parts.next().unwrap().to_string())
-        }
-        _ => None,
-    };
-
-    Ok(FromItem::Table { name, alias })
-}
-
-fn parse_column(tok: &str) -> Expr {
-    if let Some((t, c)) = tok.split_once('.') {
-        Expr::Column {
-            table: Some(t.to_string()),
-            name: c.to_string(),
-        }
-    } else {
-        Expr::Column {
-            table: None,
-            name: tok.to_string(),
-        }
+        Ok(Expr::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        })
     }
 }

@@ -9,7 +9,7 @@ mod tests {
     use crate::frontend::sql::ast::{FromItem, Statement};
     use crate::frontend::sql::binder::{BindError, Binder, BoundStatement};
     use crate::frontend::sql::lower::{Lowered, lower_stmt};
-    use crate::frontend::sql::parser::parse;
+    use crate::frontend::sql::parser::Parser;
     use crate::ir::pretty::pretty;
     use crate::storage::table::HeapTable;
     use crate::{buffer::buffer_pool::BufferPool, storage::page_manager::FilePageManager};
@@ -64,7 +64,7 @@ mod tests {
     }
 
     fn bind(sql: &str) -> Result<BoundStatement, QueryError> {
-        let stmt = parse(sql)?;
+        let stmt = Parser::new(sql).parse_statement()?;
         let catalog = test_catalog();
         let mut binder = Binder::new(&catalog);
         let bound = binder.bind_statement(stmt)?;
@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn parses_and_predicates() {
         let sql = "SELECT name FROM users WHERE age > 18 AND score > 50;";
-        let stmt = parse(sql).unwrap();
+        let stmt = Parser::new(sql).parse_statement().unwrap();
         match stmt {
             Statement::Select(select) => {
                 assert!(select.where_clause.is_some());
@@ -140,9 +140,11 @@ mod tests {
 
     #[test]
     fn parses_order_by() {
-        let stmt = parse("SELECT name FROM users ORDER BY age DESC, name ASC;").unwrap();
+        let sql = "SELECT name FROM users ORDER BY age DESC, name ASC;";
+        let stmt = Parser::new(sql).parse_statement().unwrap();
         match stmt {
             Statement::Select(s) => {
+                println!("{:?}", s);
                 assert_eq!(s.order_by.len(), 2);
                 assert!(!s.order_by[0].asc);
                 assert!(s.order_by[1].asc);
@@ -152,7 +154,8 @@ mod tests {
     }
     #[test]
     fn parses_simple_join() {
-        let stmt = parse("SELECT name FROM users u JOIN orders o ON u.id = o.user_id;").unwrap();
+        let sql = "SELECT name FROM users u JOIN orders o ON u.id = o.user_id;";
+        let stmt = Parser::new(sql).parse_statement().unwrap();
 
         match stmt {
             Statement::Select(s) => match s.from {
@@ -168,13 +171,11 @@ mod tests {
 
     #[test]
     fn parses_chained_joins() {
-        let stmt = parse(
-            "SELECT name FROM users u \
+        let sql = "SELECT name FROM users u \
              JOIN orders o ON u.id = o.user_id \
-             JOIN payments p ON o.id = p.order_id;",
-        )
-        .unwrap();
+             JOIN payments p ON o.id = p.order_id;";
 
+        let stmt = Parser::new(sql).parse_statement().unwrap();
         match stmt {
             Statement::Select(s) => match s.from {
                 FromItem::Join { left, .. } => {
@@ -190,7 +191,7 @@ mod tests {
     #[test]
     fn parse_create_table() {
         let sql = "CREATE TABLE users (id INT, name TEXT)";
-        let stmt = parse(sql).unwrap();
+        let stmt = Parser::new(sql).parse_statement().unwrap();
 
         match stmt {
             Statement::CreateTable(ct) => {
@@ -203,7 +204,8 @@ mod tests {
 
     #[test]
     fn parse_drop_table() {
-        let stmt = parse("DROP TABLE users").unwrap();
+        let sql = "DROP TABLE users";
+        let stmt = Parser::new(sql).parse_statement().unwrap();
         matches!(stmt, Statement::DropTable(_));
     }
     #[test]

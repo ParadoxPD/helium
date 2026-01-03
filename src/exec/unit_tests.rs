@@ -6,7 +6,7 @@ mod tests {
         api::db::{Database, QueryResult},
         common::value::Value,
         exec::operator::Row,
-        frontend::sql::{binder::Binder, parser::parse},
+        frontend::sql::binder::Binder,
     };
 
     pub fn test_db() -> Database {

@@ -117,5 +117,9 @@ fn pretty_expr(e: &Expr, depth: usize, out: &mut String) {
             pretty_expr(left, depth + 1, out);
             pretty_expr(right, depth + 1, out);
         }
+        Expr::Unary { op, expr } => {
+            out.push_str(&format!("{}Unary {:?}\n", indent(depth), op));
+            pretty_expr(expr, depth + 1, out);
+        }
     }
 }

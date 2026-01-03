@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::common::value::Value;
+use crate::{common::value::Value, frontend::sql::lexer::Token};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
@@ -69,7 +69,7 @@ pub struct UpdateStmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct InsertStmt {
     pub table: String,
-    pub values: Vec<Expr>,
+    pub rows: Vec<Vec<Expr>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -89,6 +89,10 @@ pub enum Expr {
         left: Box<Expr>,
         op: BinaryOp,
         right: Box<Expr>,
+    },
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expr>,
     },
 }
 
@@ -114,6 +118,12 @@ pub enum BinaryOp {
     Div,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    Not,
+    Minus,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FromItem {
     Table {
@@ -130,25 +140,27 @@ pub enum FromItem {
 #[derive(Debug, Clone)]
 pub enum ParseError {
     UnexpectedEOF,
-    UnexpectedToken(String),
+    UnexpectedToken(Token),
     Expected {
         expected: String,
         found: Option<String>,
     },
     Unsupported(String),
     InvalidLiteral(String),
+    Message(String),
 }
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ParseError::UnexpectedEOF => write!(f, "Unexpected end of file"),
-            ParseError::UnexpectedToken(tok) => write!(f, "Unexpected token : {}", tok),
+            ParseError::UnexpectedToken(tok) => write!(f, "Unexpected token : {:?}", tok),
             ParseError::Expected { expected, found } => {
                 write!(f, "Expected : {:?}, Found : {:?}", expected, found)
             }
             ParseError::Unsupported(tok) => write!(f, "Unsupported operation : {}", tok),
             ParseError::InvalidLiteral(tok) => write!(f, "Invalid Literal : {}", tok),
+            ParseError::Message(message) => write!(f, "{}", message),
         }
     }
 }

@@ -11,7 +11,7 @@ use crate::exec::{execute_delete, execute_plan, execute_update};
 use crate::frontend::sql::ast::ParseError;
 use crate::frontend::sql::binder::{BindError, Binder, BoundStatement};
 use crate::frontend::sql::lower::{Lowered, lower_select};
-use crate::frontend::sql::parser::parse;
+use crate::frontend::sql::parser::Parser;
 use crate::frontend::sql::{lower as sql_lower, parser, pretty_ast::pretty_ast};
 use crate::ir::expr::Expr;
 use crate::ir::pretty::pretty;
@@ -252,25 +252,9 @@ impl Database {
         Ok(())
     }
 
-    pub fn debug_query(&mut self, sql: &str) -> Result<(), QueryError> {
-        let stmt = parse(sql)?;
-        println!("=== AST ===\n{}", pretty_ast(&stmt));
-
-        let mut binder = Binder::new(&self.catalog);
-        let bound = binder.bind_statement(stmt)?;
-        println!("=== BOUND ===\n{:#?}", bound);
-
-        if let BoundStatement::Select(s) = bound {
-            let plan = lower_select(s);
-            println!("=== LOGICAL PLAN ===\n{}", pretty(&plan));
-        }
-
-        Ok(())
-    }
-
     pub fn run_query(&mut self, sql: &str) -> Result<QueryResult, QueryError> {
         // 1. Parse
-        let stmt = parse(sql)?;
+        let stmt = Parser::new(sql).parse_statement()?;
 
         // 2. Bind
         let mut binder = Binder::new(&self.catalog);
@@ -281,6 +265,26 @@ impl Database {
             BoundStatement::Select(s) => {
                 let plan = lower_select(s);
                 execute_plan(plan, &self.catalog).map_err(QueryError::Exec)
+            }
+            BoundStatement::Explain { analyze, stmt } => {
+                match *stmt {
+                    BoundStatement::Select(s) => {
+                        let plan = lower_select(s);
+
+                        // Phase 1: just stringify logical plan
+                        let output = if analyze {
+                            format!("EXPLAIN ANALYZE\n{:#?}", plan)
+                        } else {
+                            format!("EXPLAIN\n{:#?}", plan)
+                        };
+
+                        Ok(QueryResult::Explain(output))
+                    }
+
+                    _ => Err(QueryError::Exec(anyhow::anyhow!(
+                        "EXPLAIN only supported for SELECT"
+                    ))),
+                }
             }
 
             BoundStatement::CreateTable(ct) => {
@@ -308,19 +312,26 @@ impl Database {
             BoundStatement::Insert(ins) => {
                 let mut rows = Vec::new();
 
-                for expr_row in ins.values {
+                // Process each row
+                for expr_row in ins.rows {
                     let mut row = Vec::new();
-                    match expr_row {
-                        Expr::Literal(v) => row.push(v),
-                        _ => {
-                            return Err(QueryError::Exec(anyhow::anyhow!("non-literal in INSERT")));
+
+                    // Process each value in the row
+                    for expr in expr_row {
+                        match expr {
+                            Expr::Literal(v) => row.push(v),
+                            _ => {
+                                return Err(QueryError::Exec(anyhow::anyhow!(
+                                    "non-literal in INSERT"
+                                )));
+                            }
                         }
                     }
+
                     rows.push(row);
                 }
 
                 self.insert_values(&ins.table, rows)?;
-
                 Ok(QueryResult::Ok)
             }
 

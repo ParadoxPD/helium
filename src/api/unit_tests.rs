@@ -8,7 +8,7 @@ mod tests {
             types::DataType,
             value::Value,
         },
-        frontend::sql::{binder::Binder, parser::parse},
+        frontend::sql::binder::Binder,
     };
 
     /// Create an isolated test database

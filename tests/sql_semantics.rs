@@ -6,19 +6,24 @@ use helpers::{data::*, harness::TestDB};
 #[test]
 fn select_where_limit() {
     let mut db = TestDB::new();
-    db.register_table("users", users_schema(), users());
+    db.exec(users_sql()).unwrap();
 
-    let rows = db.query(
-        "
+    let rows = db
+        .query(
+            "
         SELECT name
         FROM users
         WHERE age > 18
         LIMIT 1
-    ",
-    );
+        ",
+        )
+        .unwrap();
 
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["name"], Value::String("Alice".into()));
+    assert_eq!(
+        rows[0].values.get("users.name").unwrap(),
+        &Value::String("Alice".into())
+    );
 }
 
 #[test]
@@ -26,15 +31,33 @@ fn select_where_limit() {
 fn complex_predicates() {
     let mut db = TestDB::new();
 
-    db.register_table("users", users_schema(), users());
-    let rows = db.query(
+    db.exec(
         "
-        SELECT name
-        FROM users
-        WHERE (age > 18 AND active = true)
-           OR name = 'Bob'
-    ",
-    );
+        CREATE TABLE users (
+            id INT,
+            name TEXT,
+            age INT,
+            active BOOL
+        );
 
+        INSERT INTO users VALUES (1, 'Alice', 30, true);
+        INSERT INTO users VALUES (2, 'Bob', 15, false);
+        INSERT INTO users VALUES (3, 'Carol', 40, false);
+        ",
+    )
+    .unwrap();
+
+    let rows = db
+        .query(
+            "
+            SELECT name
+            FROM users
+            WHERE (age > 18 AND active = true)
+               OR name = 'Bob'
+            ",
+        )
+        .unwrap();
+
+    // Alice (age>18 && active), Bob (name='Bob')
     assert_eq!(rows.len(), 2);
 }

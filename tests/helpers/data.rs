@@ -1,54 +1,26 @@
-use helium::common::value::Value;
-use helium::exec::operator::Row;
+pub fn users_sql() -> &'static str {
+    "
+    CREATE TABLE users (
+        id INT,
+        name TEXT,
+        age INT,
+        active BOOL
+    );
 
-#[allow(dead_code)]
-pub fn users() -> Vec<Row> {
-    vec![
-        row(&[
-            ("id", Value::Int64(1)),
-            ("name", Value::String("Alice".into())),
-            ("age", Value::Int64(30)),
-            ("active", Value::Bool(true)),
-        ]),
-        row(&[
-            ("id", Value::Int64(2)),
-            ("name", Value::String("Bob".into())),
-            ("age", Value::Int64(15)),
-            ("active", Value::Bool(false)),
-        ]),
-    ]
+    INSERT INTO users VALUES (1, 'Alice', 30, true);
+    INSERT INTO users VALUES (2, 'Bob', 15, false);
+    "
 }
 
-#[allow(dead_code)]
-pub fn users_schema() -> Vec<String> {
-    vec!["id".into(), "name".into(), "age".into(), "active".into()]
-}
+pub fn orders_sql() -> &'static str {
+    "
+    CREATE TABLE orders (
+        id INT,
+        user_id INT,
+        amount INT
+    );
 
-#[allow(dead_code)]
-pub fn orders() -> Vec<Row> {
-    vec![
-        row(&[
-            ("id", Value::Int64(1)),
-            ("user_id", Value::Int64(1)),
-            ("amount", Value::Int64(200)),
-        ]),
-        row(&[
-            ("id", Value::Int64(2)),
-            ("user_id", Value::Int64(1)),
-            ("amount", Value::Int64(20)),
-        ]),
-    ]
-}
-
-#[allow(dead_code)]
-pub fn orders_schema() -> Vec<String> {
-    vec!["id".into(), "user_id".into(), "amount".into()]
-}
-
-fn row(kvs: &[(&str, Value)]) -> Row {
-    let mut r = Row::new();
-    for (k, v) in kvs {
-        r.insert(k.to_string(), v.clone());
-    }
-    r
+    INSERT INTO orders VALUES (1, 1, 200);
+    INSERT INTO orders VALUES (2, 1, 20);
+    "
 }

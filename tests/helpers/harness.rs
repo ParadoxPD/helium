@@ -1,40 +1,51 @@
 use helium::api::db::{Database, QueryResult};
 use helium::exec::operator::Row;
 
+use helium::{
+    exec::statement::execute_statement,
+    frontend::sql::{binder::Binder, parser::parse},
+};
+
 pub struct TestDB {
-    db: Database,
+    pub db: Database,
 }
 
-#[allow(dead_code)]
 impl TestDB {
     pub fn new() -> Self {
-        Self {
-            db: Database::new(),
-        }
+        let path = format!("/tmp/helium_test_{}.db", rand::random::<u64>());
+        let db = Database::open(path).unwrap();
+        Self { db }
     }
 
-    pub fn register_table(&mut self, name: &str, schema: Vec<String>, rows: Vec<Row>) {
-        self.db.insert_table(name, schema, rows);
+    pub fn exec(&mut self, sql: &str) -> Result<QueryResult, anyhow::Error> {
+        let stmt = parse(sql);
+        let binder = Binder::new(&self.db.catalog);
+        Ok(execute_statement(
+            stmt,
+            &mut self.db.catalog,
+            &binder,
+            self.db.buffer_pool.clone(),
+        )?)
     }
 
-    pub fn query(&mut self, sql: &str) -> Vec<Row> {
-        match self.db.query(sql) {
-            QueryResult::Rows(rows) => rows,
-            other => panic!("Expected rows, got {:?}", other),
+    pub fn query(&mut self, sql: &str) -> Result<Vec<helium::exec::operator::Row>, anyhow::Error> {
+        match self.exec(sql)? {
+            QueryResult::Rows(rows) => Ok(rows),
+            other => anyhow::bail!("Expected rows, got {:?}", other),
         }
     }
 
     pub fn explain(&mut self, sql: &str) -> String {
-        match self.db.query(&format!("EXPLAIN {sql}")) {
+        match self.exec(&format!("EXPLAIN {sql}")).unwrap() {
             QueryResult::Explain(s) => s,
-            other => panic!("Expected EXPLAIN output, got {:?}", other),
+            other => panic!("Expected EXPLAIN, got {:?}", other),
         }
     }
 
     pub fn explain_analyze(&mut self, sql: &str) -> String {
-        match self.db.query(&format!("EXPLAIN ANALYZE {sql}")) {
+        match self.exec(&format!("EXPLAIN ANALYZE {sql}")).unwrap() {
             QueryResult::Explain(s) => s,
-            other => panic!("Expected EXPLAIN ANALYZE output, got {:?}", other),
+            other => panic!("Expected EXPLAIN ANALYZE, got {:?}", other),
         }
     }
 }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     exec::operator::{Operator, Row},
-    storage::table::{HeapTable, Table},
+    storage::table::HeapTable,
 };
 
 pub struct DeleteExec {
@@ -17,7 +17,7 @@ impl Operator for DeleteExec {
 
     fn next(&mut self) -> Option<Row> {
         let row = self.input.next()?;
-        let rid = row;
+        let rid = row.row_id;
         self.table.delete(rid);
         None
     }

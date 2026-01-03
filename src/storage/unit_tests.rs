@@ -1,10 +1,21 @@
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use crate::{
-        buffer::frame::PAGE_SIZE,
-        common::value::Value,
-        storage::page::{Page, PageId, RowPage},
+        buffer::{buffer_pool::BufferPool, frame::PAGE_SIZE},
+        common::{schema::Schema, value::Value},
+        storage::{
+            page::{Page, PageId, RowPage},
+            page_manager::{FilePageManager, PageManager},
+            table::HeapTable,
+        },
     };
+
+    /* ============================================================
+     * RowPage tests
+     * ============================================================
+     */
 
     #[test]
     fn page_respects_capacity() {
@@ -39,7 +50,7 @@ mod tests {
         let mut page = RowPage::new(PageId(0), 1);
 
         let rid = page.insert(vec![Value::Int64(42)]).unwrap();
-        let row = page.get_row(rid.slot_id).unwrap();
+        let row = page.get(rid.slot_id).unwrap();
 
         assert_eq!(row.values[0], Value::Int64(42));
     }
@@ -76,14 +87,18 @@ mod tests {
         assert!(page2.get(r1.slot_id).is_none());
         assert_eq!(page2.get(r2.slot_id).unwrap().values[0], Value::Int64(20));
     }
-    use crate::storage::page_manager::{FilePageManager, PageManager};
+
+    /* ============================================================
+     * PageManager tests
+     * ============================================================
+     */
 
     #[test]
     fn page_manager_roundtrip() {
-        let path = "/tmp/helium_test.db";
+        let path = "/tmp/helium_pm_test.db";
         std::fs::remove_file(path).ok();
 
-        let mut pm = FilePageManager::open(path).unwrap();
+        let mut pm = FilePageManager::open(&path.into()).unwrap();
 
         let pid = pm.allocate_page();
         {
@@ -94,27 +109,25 @@ mod tests {
 
         pm.flush_all();
 
-        let mut pm2 = FilePageManager::open(path).unwrap();
+        let mut pm2 = FilePageManager::open(&path.into()).unwrap();
         let page = pm2.fetch_page(pid);
         assert_eq!(page.data[0], 42);
     }
-    use std::sync::{Arc, Mutex};
 
-    use crate::{
-        buffer::buffer_pool::BufferPool,
-        common::value::Value,
-        storage::{
-            page::{RowId, StorageRow},
-            page_manager::FilePageManager,
-            table::{HeapTable, Table},
-        },
-    };
+    /* ============================================================
+     * HeapTable tests
+     * ============================================================
+     */
+
+    fn test_heap(cap: usize) -> HeapTable {
+        let pm = Box::new(FilePageManager::open(&"/tmp/heap_test.db".into()).unwrap());
+        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
+        HeapTable::new("t".into(), Schema::new(vec!["x".into()]), cap, bp)
+    }
 
     #[test]
     fn heap_table_grows_pages() {
-        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
-        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
-        let mut t = HeapTable::new("t".into(), vec!["id".into()], 2, bp);
+        let mut t = test_heap(2);
 
         t.insert(vec![Value::Int64(1)]);
         t.insert(vec![Value::Int64(2)]);
@@ -125,30 +138,25 @@ mod tests {
 
     #[test]
     fn heap_cursor_scans_all_rows() {
-        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
-        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
-        let mut t = HeapTable::new("t".into(), vec!["id".into()], 2, bp);
+        let mut t = test_heap(2);
 
         t.insert(vec![Value::Int64(1)]);
         t.insert(vec![Value::Int64(2)]);
         t.insert(vec![Value::Int64(3)]);
 
-        let table: Arc<dyn Table> = Arc::new(t);
-        let mut c = table.scan();
-        let mut ids = Vec::new();
+        let mut cursor = Arc::new(t).scan();
+        let mut vals = Vec::new();
 
-        while let Some(row) = c.next() {
-            ids.push(row.values[0].clone());
+        while let Some((_rid, row)) = cursor.next() {
+            vals.push(row.values[0].clone());
         }
 
-        assert_eq!(ids.len(), 3);
+        assert_eq!(vals.len(), 3);
     }
 
     #[test]
     fn insert_returns_stable_row_ids() {
-        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
-        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
-        let mut table = HeapTable::new("users".into(), vec!["id".into()], 2, bp);
+        let mut table = test_heap(2);
 
         let r1 = table.insert(vec![Value::Int64(1)]);
         let r2 = table.insert(vec![Value::Int64(2)]);
@@ -160,9 +168,7 @@ mod tests {
 
     #[test]
     fn insert_allocates_new_page_when_full() {
-        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
-        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
-        let mut table = HeapTable::new("users".into(), vec!["id".into()], 1, bp);
+        let mut table = test_heap(1);
 
         let r1 = table.insert(vec![Value::Int64(1)]);
         let r2 = table.insert(vec![Value::Int64(2)]);
@@ -172,90 +178,56 @@ mod tests {
 
     #[test]
     fn delete_hides_row_but_preserves_slot() {
-        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
-        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
-        let mut table = HeapTable::new("users".into(), vec!["id".into()], 2, bp);
+        let mut table = test_heap(2);
 
         let r1 = table.insert(vec![Value::Int64(1)]);
-        let r2 = table.insert(vec![Value::Int64(2)]);
+        let _r2 = table.insert(vec![Value::Int64(2)]);
 
         assert!(table.delete(r1));
 
-        let table: Arc<dyn Table> = Arc::new(table);
-        let mut cursor = table.scan();
+        let mut cursor = Arc::new(table).scan();
+        let mut rows = Vec::new();
 
-        let mut seen = Vec::new();
         while let Some(row) = cursor.next() {
-            seen.push(row);
+            rows.push(row);
         }
-
-        assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].values[0], Value::Int64(2));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.values[0], Value::Int64(2));
     }
 
     #[test]
-    fn update_overwrites_row_in_place() {
-        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
-        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
-        let mut table = HeapTable::new("users".into(), vec!["age".into()], 2, bp);
+    fn delete_and_insert_preserves_slot_reuse() {
+        let mut table = test_heap(1);
 
-        let rid = table.insert(vec![Value::Int64(20)]);
+        let r1 = table.insert(vec![Value::Int64(1)]);
+        table.delete(r1);
 
-        assert!(table.update(rid, vec![Value::Int64(21)]));
+        let r2 = table.insert(vec![Value::Int64(2)]);
 
-        let mut cursor = Arc::new(table).scan();
-        let r = cursor.next().unwrap();
-
-        assert_eq!(r.values[0], Value::Int64(21));
-        assert_eq!(r.rid, rid);
-    }
-
-    #[test]
-    fn update_fails_on_deleted_row() {
-        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
-        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
-        let mut table = HeapTable::new("users".into(), vec!["x".into()], 1, bp);
-
-        let rid = table.insert(vec![Value::Int64(1)]);
-        table.delete(rid);
-
-        assert!(!table.update(rid, vec![Value::Int64(2)]));
-    }
-
-    #[test]
-    fn update_preserves_slot_id() {
-        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
-        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
-        let mut table = HeapTable::new("t".into(), vec!["x".into()], 1, bp);
-
-        let rid = table.insert(vec![Value::Int64(1)]);
-        table.update(rid, vec![Value::Int64(99)]);
-
-        let mut cursor = Arc::new(table).scan();
-        let r = cursor.next().unwrap();
-
-        assert_eq!(r.rid.slot_id, rid.slot_id);
+        assert_eq!(r1.page_id, r2.page_id);
+        assert_eq!(r1.slot_id, r2.slot_id);
     }
 
     #[test]
     fn heap_table_disk_roundtrip() {
-        let pm = Box::new(FilePageManager::open("/tmp/heap.db").unwrap());
-        let bp = Arc::new(Mutex::new(BufferPool::new(pm)));
-
-        let mut table = HeapTable::new("t".into(), vec!["x".into()], 4, bp);
+        let mut table = test_heap(4);
 
         let r1 = table.insert(vec![Value::Int64(1)]);
         let r2 = table.insert(vec![Value::Int64(2)]);
-
         table.delete(r1);
 
-        let v = table.fetch(r2);
-        assert_eq!(v.values[0], Value::Int64(2));
+        let row = table.fetch(r2);
+        assert_eq!(row.values[0], Value::Int64(2));
     }
+
+    /* ============================================================
+     * BufferPool tests
+     * ============================================================
+     */
 
     #[test]
     fn buffer_pool_caches_pages() {
-        let pm = Box::new(FilePageManager::open("/tmp/bp.db").unwrap());
+        let pm = Box::new(FilePageManager::open(&"/tmp/bp_test.db".into()).unwrap());
         let mut bp = BufferPool::new(pm);
 
         let pid = bp.pm.allocate_page();

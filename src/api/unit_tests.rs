@@ -1,204 +1,226 @@
 #[cfg(test)]
 mod tests {
-    use maplit::hashmap;
 
-    use super::*;
-    use crate::common::value::Value;
+    use crate::{
+        api::db::{Database, QueryResult},
+        common::{
+            schema::{Column, Schema},
+            types::DataType,
+            value::Value,
+        },
+        frontend::sql::{binder::Binder, parser::parse},
+    };
 
-    fn row(pairs: &[(&str, Value)]) -> Row {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect()
+    /// Create an isolated test database
+    pub fn test_db() -> Database {
+        let path = format!("/tmp/helium_test_{}.db", rand::random::<u64>());
+        Database::open(path).unwrap()
+    }
+
+    /// Build a schema from column names (Phase 1: all Int64 unless specified later)
+    pub fn schema(cols: &[&str]) -> Schema {
+        Schema {
+            columns: cols
+                .iter()
+                .map(|c| Column {
+                    name: c.to_string(),
+                    ty: DataType::Int64,
+                    nullable: true, // Phase 1 simplification
+                })
+                .collect(),
+        }
+    }
+
+    pub fn exec(db: &mut Database, sql: &str) -> QueryResult {
+        db.run_query(sql).unwrap()
+    }
+
+    /// Insert raw storage rows (Vec<Value>) into a table
+    pub fn insert_values(db: &mut Database, table: &str, rows: Vec<Vec<Value>>) {
+        let entry = db.catalog.get_table(table).unwrap();
+        entry.heap.insert_rows(rows);
     }
 
     #[test]
     fn sql_query_with_and_and_limit() {
-        let mut db = Database::new();
+        let mut db = test_db();
 
-        let schema = vec!["name".into(), "age".into(), "score".into()];
+        exec(&mut db, "CREATE TABLE users (name INT, age INT, score INT)");
 
-        db.insert_table(
+        insert_values(
+            &mut db,
             "users",
-            schema,
             vec![
-                row(&[
-                    ("name", Value::String("Alice".into())),
-                    ("age", Value::Int64(30)),
-                    ("score", Value::Int64(80)),
-                ]),
-                row(&[
-                    ("name", Value::String("Bob".into())),
-                    ("age", Value::Int64(15)),
-                    ("score", Value::Int64(90)),
-                ]),
-                row(&[
-                    ("name", Value::String("Carol".into())),
-                    ("age", Value::Int64(40)),
-                    ("score", Value::Int64(40)),
-                ]),
+                vec![
+                    Value::String("Alice".into()),
+                    Value::Int64(30),
+                    Value::Int64(80),
+                ],
+                vec![
+                    Value::String("Bob".into()),
+                    Value::Int64(15),
+                    Value::Int64(90),
+                ],
+                vec![
+                    Value::String("Carol".into()),
+                    Value::Int64(40),
+                    Value::Int64(40),
+                ],
             ],
         );
 
-        match db.query("SELECT name FROM users WHERE age > 18 AND score > 50 LIMIT 1;") {
+        match exec(
+            &mut db,
+            "SELECT name FROM users WHERE age > 18 AND score > 50 LIMIT 1",
+        ) {
             QueryResult::Rows(results) => {
                 assert_eq!(results.len(), 1);
-                assert_eq!(results[0].get("name"), Some(&Value::String("Alice".into())));
+                assert_eq!(
+                    results[0].values.get("users.name"),
+                    Some(&Value::String("Alice".into()))
+                );
             }
             _ => panic!("expected rows"),
         }
     }
-
     #[test]
     fn sql_order_by_works() {
-        let mut db = Database::new();
+        let mut db = test_db();
 
-        let schema = vec!["name".into(), "age".into()];
+        exec(&mut db, "CREATE TABLE users (name INT, age INT)");
 
-        db.insert_table(
+        insert_values(
+            &mut db,
             "users",
-            schema,
             vec![
-                row(&[
-                    ("name", Value::String("Bob".into())),
-                    ("age", Value::Int64(30)),
-                ]),
-                row(&[
-                    ("name", Value::String("Alice".into())),
-                    ("age", Value::Int64(20)),
-                ]),
+                vec![Value::String("Bob".into()), Value::Int64(30)],
+                vec![Value::String("Alice".into()), Value::Int64(20)],
             ],
         );
 
-        match db.query("SELECT name FROM users ORDER BY age ASC;") {
+        match exec(&mut db, "SELECT name FROM users ORDER BY age ASC") {
             QueryResult::Rows(rows) => {
-                assert_eq!(rows[0].get("name"), Some(&Value::String("Alice".into())));
+                assert_eq!(
+                    rows[0].values.get("users.name"),
+                    Some(&Value::String("Alice".into()))
+                );
             }
             _ => panic!("expected rows"),
         }
     }
-
     #[test]
     fn sql_join_works() {
-        let mut db = Database::new();
+        let mut db = test_db();
 
-        let users_schema = vec!["id".into(), "name".into()];
+        exec(&mut db, "CREATE TABLE users (id INT, name INT)");
+        exec(&mut db, "CREATE TABLE orders (user_id INT, amount INT)");
 
-        let orders_schema = vec!["user_id".into(), "amount".into()];
-
-        db.insert_table(
+        insert_values(
+            &mut db,
             "users",
-            users_schema,
-            vec![row(&[
-                ("id", Value::Int64(1)),
-                ("name", Value::String("Alice".into())),
-            ])],
+            vec![vec![Value::Int64(1), Value::String("Alice".into())]],
         );
 
-        db.insert_table(
+        insert_values(
+            &mut db,
             "orders",
-            orders_schema,
-            vec![row(&[
-                ("user_id", Value::Int64(1)),
-                ("amount", Value::Int64(200)),
-            ])],
+            vec![vec![Value::Int64(1), Value::Int64(200)]],
         );
 
-        match db.query("SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id;") {
+        match exec(
+            &mut db,
+            "SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id",
+        ) {
             QueryResult::Rows(rows) => {
                 assert_eq!(rows.len(), 1);
-                assert_eq!(rows[0].get("name"), Some(&Value::String("Alice".into())));
+                assert_eq!(
+                    rows[0].values.get("u.name"),
+                    Some(&Value::String("Alice".into()))
+                );
             }
             _ => panic!("expected rows"),
         }
     }
-
     #[test]
     fn create_index_registers_in_catalog() {
-        let mut db = Database::new();
+        let mut db = test_db();
 
-        db.insert_table("users", vec!["id".into(), "age".into()], vec![]);
-
-        db.query("CREATE INDEX idx_users_age ON users(age)");
+        exec(&mut db, "CREATE TABLE users (id INT, age INT)");
+        exec(&mut db, "CREATE INDEX idx_users_age ON users(age)");
 
         let index = db.catalog.get_index("users", "age");
-
         assert!(index.is_some());
     }
-
     #[test]
     fn create_index_enables_index_scan() {
-        let mut db = Database::new();
-        let rows = vec![
-            hashmap! { "id".into() => Value::Int64(1), "age".into() => Value::Int64(20) },
-            hashmap! { "id".into() => Value::Int64(2), "age".into() => Value::Int64(30) },
-        ];
-        println!("{:?}", rows);
+        let mut db = test_db();
 
-        db.insert_table("users", vec!["id".into(), "age".into()], rows);
+        exec(&mut db, "CREATE TABLE users (id INT, age INT)");
 
-        let res = db.query("CREATE INDEX idx_users_age ON users(age)");
-        println!("{:?}", res);
+        insert_values(
+            &mut db,
+            "users",
+            vec![
+                vec![Value::Int64(1), Value::Int64(20)],
+                vec![Value::Int64(2), Value::Int64(30)],
+            ],
+        );
 
-        let result = db.query("SELECT * FROM users WHERE age = 20");
+        exec(&mut db, "CREATE INDEX idx_users_age ON users(age)");
 
-        match result {
+        match exec(&mut db, "SELECT * FROM users WHERE age = 20") {
             QueryResult::Rows(rows) => {
                 assert_eq!(rows.len(), 1);
-                println!("RETURNED ROWS = {:?}", rows);
-                assert_eq!(rows[0]["age"], Value::Int64(20));
+                assert_eq!(rows[0].values.get("users.age"), Some(&Value::Int64(20)));
             }
             _ => panic!("expected rows"),
         }
     }
-
     #[test]
     fn create_index_twice_errors_or_overwrites() {
-        let mut db = Database::new();
+        let mut db = test_db();
 
-        db.insert_table("users", vec!["id".into(), "age".into()], vec![]);
+        exec(&mut db, "CREATE TABLE users (id INT, age INT)");
+        exec(&mut db, "CREATE INDEX idx_users_age ON users(age)");
 
-        db.query("CREATE INDEX idx_users_age ON users(age)");
+        let result = exec(&mut db, "CREATE INDEX idx_users_age ON users(age)");
 
-        // Second create — choose ONE behavior:
-        // either panic OR overwrite OR return error
-        let result = db.query("CREATE INDEX idx_users_age ON users(age)");
-
-        // If you choose overwrite or ignore:
-        matches!(result, QueryResult::Explain(_));
+        // Phase 1 decision: overwrite or ignore is allowed
+        matches!(result, QueryResult::Ok);
     }
-
     #[test]
     fn drop_index_removes_from_catalog() {
-        let mut db = Database::new();
+        let mut db = test_db();
 
-        db.insert_table("users", vec!["id".into(), "age".into()], vec![]);
+        exec(&mut db, "CREATE TABLE users (id INT, age INT)");
+        exec(&mut db, "CREATE INDEX idx_users_age ON users(age)");
 
-        db.query("CREATE INDEX idx_users_age ON users(age)");
         assert!(db.catalog.get_index("users", "age").is_some());
 
-        db.query("DROP INDEX idx_users_age");
+        exec(&mut db, "DROP INDEX idx_users_age");
+
         assert!(db.catalog.get_index("users", "age").is_none());
     }
-
     #[test]
     fn drop_index_disables_index_scan() {
-        let mut db = Database::new();
+        let mut db = test_db();
 
-        db.insert_table(
+        exec(&mut db, "CREATE TABLE users (id INT, age INT)");
+
+        insert_values(
+            &mut db,
             "users",
-            vec!["id".into(), "age".into()],
-            vec![hashmap! { "id".into() => Value::Int64(1), "age".into() => Value::Int64(20) }],
+            vec![vec![Value::Int64(1), Value::Int64(20)]],
         );
 
-        db.query("CREATE INDEX idx_users_age ON users(age)");
-        db.query("DROP INDEX idx_users_age");
+        exec(&mut db, "CREATE INDEX idx_users_age ON users(age)");
+        exec(&mut db, "DROP INDEX idx_users_age");
 
-        let plan = match db.query("EXPLAIN SELECT * FROM users WHERE age = 20") {
-            QueryResult::Explain(e) => e,
-            _ => panic!(),
-        };
-
-        assert!(!plan.contains("IndexScan"));
+        match exec(&mut db, "EXPLAIN SELECT * FROM users WHERE age = 20") {
+            QueryResult::Explain(plan) => {
+                assert!(!plan.contains("IndexScan"));
+            }
+            _ => panic!("expected explain"),
+        }
     }
 }

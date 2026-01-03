@@ -9,28 +9,27 @@ pub mod operator;
 pub mod project;
 pub mod scan;
 pub mod sort;
-pub mod statement;
 pub mod unit_tests;
 pub mod update;
 
+use anyhow::{Result, bail};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 use crate::api::db::QueryResult;
+use crate::common::schema::Schema;
+use crate::common::value::Value;
 use crate::exec::catalog::Catalog;
+use crate::exec::expr_eval::{eval_predicate, eval_value};
 use crate::exec::filter::FilterExec;
 use crate::exec::index_scan::IndexScanExec;
 use crate::exec::join::JoinExec;
 use crate::exec::limit::LimitExec;
-use crate::exec::operator::Operator;
+use crate::exec::operator::{Operator, Row};
 use crate::exec::project::ProjectExec;
 use crate::exec::scan::ScanExec;
 use crate::exec::sort::SortExec;
-use crate::frontend::sql::ast::Statement;
+use crate::frontend::sql::binder::{BoundDelete, BoundInsert, BoundUpdate};
 use crate::ir::plan::LogicalPlan;
-use crate::storage::btree::node::Index;
-use crate::storage::page::StorageRow;
-use crate::storage::table::Table;
 
 pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
     match plan {
@@ -81,55 +80,105 @@ pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
                 index,
                 scan.predicate.clone(),
                 scan.column.clone(),
-                table.heap.schema().to_vec(),
+                table.heap.schema().clone(),
             ))
         }
     }
 }
 
-pub fn execute_statement(stmt: Statement, catalog: &mut Catalog) -> QueryResult {
-    match stmt {
-        Statement::CreateTable(stmt) => {
-            let bound = binder.bind_create_table(stmt)?;
-            catalog.create_table(bound.table, bound.schema)?;
-            QueryResult::Empty
-        }
+pub fn execute_plan(plan: LogicalPlan, catalog: &Catalog) -> Result<QueryResult, anyhow::Error> {
+    let mut op = lower(&plan, catalog);
 
-        Statement::DropTable(stmt) => {
-            let bound = binder.bind_drop_table(stmt)?;
-            catalog.drop_table(&bound.table)?;
-            QueryResult::Empty
-        }
+    op.open();
 
-        Statement::Insert(stmt) => {
-            let bound = binder.bind_insert(stmt)?;
-            let table = catalog.get_table_mut(&bound.table)?;
-            let mut row = StorageRow::new();
-            for expr in bound.values {
-                row.push(expr.eval_const()?);
-            }
-            table.heap.insert(row);
-            QueryResult::Empty
-        }
-
-        Statement::Delete(stmt) => {
-            let bound = binder.bind_delete(stmt)?;
-            let plan = build_delete_plan(bound, catalog)?;
-            execute_plan(plan)
-        }
-
-        Statement::Update(stmt) => {
-            let bound = binder.bind_update(stmt)?;
-            let plan = build_update_plan(bound, catalog)?;
-            execute_plan(plan)
-        }
-
-        // SELECT and EXPLAIN go through lowering
-        s @ Statement::Select(_) | s @ Statement::Explain { .. } => {
-            let lowered = lower_stmt(s, catalog);
-            execute_lowered(lowered, catalog)
-        }
-
-        _ => unreachable!(),
+    let mut rows = Vec::new();
+    while let Some(row) = op.next() {
+        rows.push(row);
     }
+
+    op.close();
+
+    Ok(QueryResult::Rows(rows))
+}
+
+pub fn execute_delete(del: BoundDelete, catalog: &Catalog) -> Result<(), anyhow::Error> {
+    let table = catalog
+        .get_table(&del.table)
+        .ok_or_else(|| anyhow::anyhow!("table '{}' not found", del.table))?;
+
+    let mut cursor = table.heap.scan();
+
+    while let Some((rid, storage_row)) = cursor.next() {
+        let row = Row {
+            row_id: rid,
+            values: materialize_row(&storage_row.values, &table.schema)?,
+        };
+
+        if let Some(pred) = &del.predicate {
+            if !eval_predicate(pred, &row) {
+                continue;
+            }
+        }
+
+        table.heap.delete(rid);
+    }
+
+    Ok(())
+}
+
+pub fn execute_update(upd: BoundUpdate, catalog: &Catalog) -> Result<(), anyhow::Error> {
+    let table = catalog
+        .get_table(&upd.table)
+        .ok_or_else(|| anyhow::anyhow!("table '{}' not found", upd.table))?;
+
+    let mut cursor = table.heap.scan();
+
+    while let Some((rid, storage_row)) = cursor.next() {
+        let row = Row {
+            row_id: rid,
+            values: materialize_row(&storage_row.values, &table.schema)?,
+        };
+
+        if let Some(pred) = &upd.predicate {
+            if !eval_predicate(pred, &row) {
+                continue;
+            }
+        }
+
+        let mut updated = row.values.clone();
+        for (col, expr) in &upd.assignments {
+            let v = eval_value(expr, &row);
+            updated.insert(col.name.clone(), v);
+        }
+
+        let physical = table
+            .schema
+            .columns
+            .iter()
+            .map(|c| updated.get(&c.name).cloned().unwrap_or(Value::Null))
+            .collect::<Vec<_>>();
+
+        table.heap.delete(rid);
+        table.heap.insert(physical);
+    }
+
+    Ok(())
+}
+
+pub fn materialize_row(values: &[Value], schema: &Schema) -> Result<HashMap<String, Value>> {
+    if values.len() != schema.columns.len() {
+        bail!(
+            "row/schema length mismatch: {} values, {} columns",
+            values.len(),
+            schema.columns.len()
+        );
+    }
+
+    let mut map = HashMap::with_capacity(values.len());
+
+    for (col, val) in schema.columns.iter().zip(values.iter()) {
+        map.insert(col.name.clone(), val.clone());
+    }
+
+    Ok(map)
 }

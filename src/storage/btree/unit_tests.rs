@@ -1,6 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use crate::storage::btree::node::IndexKey;
+    use crate::storage::{
+        btree::{DiskBPlusTree, node::IndexKey},
+        page::RowId,
+    };
 
     #[test]
     fn index_key_roundtrip() {
@@ -42,7 +45,7 @@ mod tests {
     fn insert_and_get_single_key() {
         let path = format!("/tmp/db_{}.db", rand::random::<u64>());
         let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
+            FilePageManager::open(&path.into()).unwrap(),
         ))));
 
         let mut tree = DiskBPlusTree::new(4, bp);
@@ -60,7 +63,7 @@ mod tests {
     fn leaf_split_and_lookup() {
         let path = format!("/tmp/db_{}.db", rand::random::<u64>());
         let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
+            FilePageManager::open(&path.into()).unwrap(),
         ))));
 
         let mut tree = DiskBPlusTree::new(3, bp);
@@ -79,7 +82,7 @@ mod tests {
     fn range_query_across_leaves() {
         let path = format!("/tmp/db_{}.db", rand::random::<u64>());
         let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
+            FilePageManager::open(&path.into()).unwrap(),
         ))));
 
         let mut tree = DiskBPlusTree::new(3, bp);
@@ -98,7 +101,7 @@ mod tests {
     fn delete_and_rebalance() {
         let path = format!("/tmp/db_{}.db", rand::random::<u64>());
         let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
+            FilePageManager::open(&path.into()).unwrap(),
         ))));
 
         let mut tree = DiskBPlusTree::new(3, bp);
@@ -120,7 +123,7 @@ mod tests {
     fn delete_all_and_reinsert() {
         let path = format!("/tmp/db_{}.db", rand::random::<u64>());
         let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
+            FilePageManager::open(&path.into()).unwrap(),
         ))));
 
         let mut tree = DiskBPlusTree::new(3, bp);
@@ -147,7 +150,7 @@ mod tests {
         use rand::{rng, seq::SliceRandom};
         let path = format!("/tmp/db_{}.db", rand::random::<u64>());
         let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
+            FilePageManager::open(&path.into()).unwrap(),
         ))));
 
         let mut tree = DiskBPlusTree::new(4, bp);
@@ -171,8 +174,9 @@ mod tests {
 
     #[test]
     fn disk_btree_insert_lookup() {
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
         let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open("/tmp/btree.db").unwrap(),
+            FilePageManager::open(&path.into()).unwrap(),
         ))));
 
         let mut tree = DiskBPlusTree::new(4, bp.clone());
@@ -198,8 +202,9 @@ mod tests {
 
     #[test]
     fn disk_btree_basic() {
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
         let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open("/tmp/db.db").unwrap(),
+            FilePageManager::open(&path.into()).unwrap(),
         ))));
 
         let mut tree = DiskBPlusTree::new(4, bp);
@@ -231,8 +236,9 @@ mod tests {
 
     #[test]
     fn delete_rebalance_disk_tree() {
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
         let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open("/tmp/db.db").unwrap(),
+            FilePageManager::open(&path.into()).unwrap(),
         ))));
 
         let mut tree = DiskBPlusTree::new(4, bp);
@@ -264,8 +270,9 @@ mod tests {
 
     #[test]
     fn insert_split_disk_tree() {
+        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
         let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open("/tmp/db.db").unwrap(),
+            FilePageManager::open(&path.into()).unwrap(),
         ))));
 
         let mut tree = DiskBPlusTree::new(4, bp);

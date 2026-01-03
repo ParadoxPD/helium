@@ -8,13 +8,15 @@ fn limit_short_circuits_execution() {
     let mut db = TestDB::new();
     db.exec(users_sql()).unwrap();
 
-    let stats = db.explain_analyze(
-        "
+    let stats = db
+        .explain_analyze(
+            "
         SELECT *
         FROM users
         LIMIT 1
         ",
-    );
+        )
+        .unwrap();
 
     assert!(stats.contains("rows=1"));
 }

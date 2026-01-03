@@ -1,5 +1,5 @@
 use crate::exec::catalog::Catalog;
-use crate::frontend::sql::binder::{Binder, BoundFromItem, BoundSelect};
+use crate::frontend::sql::binder::{Binder, BoundFromItem, BoundSelect, BoundStatement};
 use crate::frontend::sql::pretty_binder::pretty_bound;
 use crate::ir::expr::Expr as IRExpr;
 use crate::ir::plan::{Join, LogicalPlan, Sort};
@@ -24,29 +24,47 @@ pub enum Lowered {
 
 pub fn lower_stmt(stmt: Statement, catalog: &Catalog) -> Lowered {
     match stmt {
-        Statement::Select(s) => {
-            let bound = Binder::bind(s, catalog).expect("bind error");
-            println!("BOUND:\n{}", pretty_bound(&bound));
-            Lowered::Plan(lower_select(bound))
-        }
         Statement::Explain { analyze, stmt } => {
             let inner = lower_stmt(*stmt, catalog);
             match inner {
                 Lowered::Plan(plan) => Lowered::Explain { analyze, plan },
-                _ => unreachable!(),
+                _ => unreachable!("EXPLAIN can only wrap a plan"),
             }
         }
+
+        // SELECT goes through binder → logical plan
+        Statement::Select(_) => {
+            let mut binder = Binder::new(catalog);
+
+            match binder.bind_statement(stmt).expect("bind error") {
+                BoundStatement::Select(bound) => Lowered::Plan(lower_select(bound)),
+                _ => unreachable!("SELECT must bind to BoundSelect"),
+            }
+        }
+
+        // CREATE INDEX must be validated by binder
         Statement::CreateIndex {
             name,
             table,
             column,
-        } => Lowered::CreateIndex {
-            name,
-            table,
-            column,
-        },
+        } => {
+            let mut binder = Binder::new(catalog);
+
+            // validate table + column existence
+            binder.tables.insert(table.clone(), table.clone());
+            binder.resolve_column(&table, &column).expect("bind error");
+
+            Lowered::CreateIndex {
+                name,
+                table,
+                column,
+            }
+        }
+
+        // DROP INDEX is syntactic for now
         Statement::DropIndex { name } => Lowered::DropIndex { name },
-        _ => panic!("Should not reach here"),
+
+        _ => panic!("statement not lowered here"),
     }
 }
 

@@ -5,7 +5,6 @@ use crate::exec::expr_eval::eval_predicate;
 use crate::exec::operator::{Operator, Row};
 use crate::ir::expr::Expr;
 use crate::storage::page_manager::FilePageManager;
-use crate::storage::table::{HeapTable, Table};
 
 pub struct JoinExec {
     left: Box<dyn Operator>,
@@ -37,8 +36,8 @@ impl JoinExec {
 
     fn merge_rows(left: &Row, right: &Row) -> Row {
         let mut out = left.clone();
-        for (k, v) in right {
-            out.insert(k.clone(), v.clone());
+        for (k, v) in right.values.clone() {
+            out.values.insert(k, v);
         }
         out
     }

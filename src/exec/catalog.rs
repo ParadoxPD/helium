@@ -6,17 +6,14 @@ use std::{
 use anyhow::{Result, anyhow, bail};
 
 use crate::{
-    buffer::buffer_pool::BufferPool,
-    common::schema::Schema,
-    storage::{
-        btree::node::Index,
-        page_manager::FilePageManager,
-        table::{HeapTable, Table},
-    },
+    buffer::buffer_pool::{BufferPool, BufferPoolHandle},
+    common::{schema::Schema, value::Value},
+    storage::{btree::node::Index, page::RowId, page_manager::FilePageManager, table::HeapTable},
 };
 
-const DEFAULT_PAGE_CAPACITY: usize = 2048;
+const DEFAULT_PAGE_CAPACITY: usize = 256;
 
+#[derive(Clone)]
 pub struct IndexEntry {
     pub name: String,
     pub table: String,
@@ -24,6 +21,7 @@ pub struct IndexEntry {
     pub index: Arc<Mutex<dyn Index>>,
 }
 
+#[derive(Clone)]
 pub struct Catalog {
     pub tables: HashMap<String, TableEntry>,
     pub indexes: HashMap<String, IndexEntry>,
@@ -89,26 +87,31 @@ impl Catalog {
         self.indexes.values().filter(|e| e.table == table).collect()
     }
 
-    pub fn create_table(&mut self, name: String, schema: Schema) -> Result<()> {
-        if self.tables.contains_key(&name) {
+    pub fn create_table(
+        &mut self,
+        table_name: String,
+        schema: Schema,
+        buffer_pool: BufferPoolHandle,
+    ) -> Result<()> {
+        if self.tables.contains_key(&table_name) {
             bail!("table already exists");
         }
 
-        let path = format!("/tmp/{}.db", name);
-
-        let buffer_pool = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
-        ))));
-
         let heap = Arc::new(HeapTable::new(
-            name.clone(),
+            table_name.clone(),
             schema.clone(),
             DEFAULT_PAGE_CAPACITY,
-            buffer_pool.clone(),
+            buffer_pool,
         ));
 
-        self.tables
-            .insert(name.clone(), TableEntry { name, schema, heap });
+        self.tables.insert(
+            table_name.clone(),
+            TableEntry {
+                name: table_name,
+                schema,
+                heap,
+            },
+        );
 
         Ok(())
     }
@@ -121,5 +124,14 @@ impl Catalog {
         self.indexes.retain(|_, e| e.table != name);
 
         Ok(())
+    }
+
+    pub fn insert_row(&self, table: &str, values: Vec<Value>) -> Result<RowId> {
+        let entry = self
+            .tables
+            .get(table)
+            .ok_or_else(|| anyhow!("table not found"))?;
+
+        Ok(entry.heap.insert(values))
     }
 }

@@ -31,6 +31,7 @@ pub fn eval_value(expr: &Expr, row: &Row) -> Value {
         }
 
         Expr::BoundColumn { table, name } => row
+            .values
             .get(&format!("{table}.{name}"))
             .cloned()
             .unwrap_or(Value::Null),
@@ -61,6 +62,8 @@ pub fn eval_predicate(expr: &Expr, row: &Row) -> bool {
         },
 
         Expr::Literal(Value::Bool(b)) => *b,
+        Expr::Literal(Value::Null) => false,
+
         _ => false,
     }
 }

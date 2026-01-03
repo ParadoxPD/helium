@@ -17,21 +17,27 @@ pub struct RowId {
     pub slot_id: u16,
 }
 
+impl Default for RowId {
+    fn default() -> Self {
+        RowId {
+            page_id: PageId(0),
+            slot_id: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StorageRow {
-    pub rid: RowId,
     pub values: Vec<Value>,
 }
 
 impl StorageRow {
     pub fn new(values: Vec<Value>) -> Self {
-        Self {
-            rid: RowId {
-                page_id: PageId(0),
-                slot_id: 0,
-            },
-            values: values,
-        }
+        Self { values: values }
+    }
+
+    pub fn push(&mut self, value: Value) {
+        self.values.push(value)
     }
 }
 
@@ -123,14 +129,6 @@ impl RowPage {
             return None;
         }
 
-        let row = StorageRow {
-            rid: RowId {
-                page_id: self.id,
-                slot_id: 0, // filled below
-            },
-            values,
-        };
-
         let slot_id = if let Some(free) = self.free_slots.pop() {
             let slot = &mut self.slots[free as usize];
             slot.used = true;
@@ -145,10 +143,7 @@ impl RowPage {
             slot_id
         };
 
-        let mut row = row;
-        row.rid.slot_id = slot_id;
-        self.rows.push(row);
-        self.assert_consistent();
+        self.rows.push(StorageRow { values });
 
         Some(RowId {
             page_id: self.id,
@@ -300,13 +295,7 @@ impl RowPage {
             let consumed = buf[row_ptr..].len() - slice.len();
             row_ptr += consumed;
 
-            rows.push(StorageRow {
-                rid: RowId {
-                    page_id: id,
-                    slot_id: 0, // filled via slot lookup
-                },
-                values,
-            });
+            rows.push(StorageRow { values });
         }
 
         // ---- free slots ----

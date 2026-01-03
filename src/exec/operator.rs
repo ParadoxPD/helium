@@ -1,7 +1,19 @@
-use crate::common::value::Value;
+use crate::{common::value::Value, storage::page::RowId};
 use std::collections::HashMap;
 
-pub type Row = HashMap<String, Value>;
+#[derive(Debug, Clone, PartialEq)]
+pub struct Row {
+    pub row_id: RowId,
+    pub values: HashMap<String, Value>,
+}
+impl Default for Row {
+    fn default() -> Self {
+        Self {
+            row_id: RowId::default(),
+            values: HashMap::new(),
+        }
+    }
+}
 
 pub trait Operator {
     fn open(&mut self);

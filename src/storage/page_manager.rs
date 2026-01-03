@@ -3,6 +3,7 @@ use crate::storage::page::PageId;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub trait PageManager: Send + Sync {
@@ -14,6 +15,7 @@ pub trait PageManager: Send + Sync {
 
 pub type PageManagerHandle = Arc<Mutex<dyn PageManager>>;
 
+#[derive(Debug)]
 pub struct FilePageManager {
     file: File,
     pages: HashMap<PageId, PageFrame>,
@@ -21,7 +23,7 @@ pub struct FilePageManager {
 }
 
 impl FilePageManager {
-    pub fn open(path: &str) -> std::io::Result<Self> {
+    pub fn open(path: &PathBuf) -> std::io::Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)

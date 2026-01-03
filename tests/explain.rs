@@ -9,14 +9,16 @@ fn explain_structure() {
     let mut db = TestDB::new();
     db.exec(users_sql()).unwrap();
 
-    let plan = db.explain(
-        "
+    let plan = db
+        .explain(
+            "
         SELECT name
         FROM users
         WHERE age > 18
         LIMIT 5
         ",
-    );
+        )
+        .unwrap();
 
     assert!(plan.contains("Limit 5"));
     assert!(plan.contains("Filter"));

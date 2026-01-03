@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::exec::expr_eval::eval_value;
 use crate::exec::operator::{Operator, Row};
 use crate::ir::expr::Expr;
@@ -20,7 +22,7 @@ impl Operator for ProjectExec {
 
     fn next(&mut self) -> Option<Row> {
         let row = self.input.next()?;
-        let mut out = Row::new();
+        let mut out = HashMap::new();
 
         for (expr, alias) in &self.exprs {
             let value = eval_value(expr, &row);
@@ -32,7 +34,10 @@ impl Operator for ProjectExec {
             "Project output must be unqualified"
         );
 
-        Some(out)
+        Some(Row {
+            row_id: row.row_id,
+            values: out,
+        })
     }
 
     fn close(&mut self) {

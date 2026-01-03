@@ -3,6 +3,10 @@ name = "helium"
 version = "0.1.0"
 edition = "2024"
 
+exclude = [
+    "*/unit_tests.rs",
+]
+
 [dependencies]
 anyhow = "1.0.100"
 maplit = "1.0.2"

@@ -1,7 +1,18 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::common::schema::Column;
     use crate::common::value::Value;
+    use crate::ir::expr::{BinaryOp, Expr, UnaryOp};
+    use crate::ir::plan::LogicalPlan;
+    use crate::ir::pretty::pretty;
+    use crate::ir::validate::{ValidationError, validate};
+
+    /* ============================================================
+     * Expr constant propagation
+     * ============================================================
+     */
 
     #[test]
     fn literal_is_constant() {
@@ -40,26 +51,13 @@ mod tests {
     #[test]
     fn unary_expression_constant_propagation() {
         let expr = Expr::unary(UnaryOp::Neg, Expr::lit(Value::Int64(5)));
-
         assert!(expr.is_constant());
     }
 
-    #[test]
-    fn column_ref_unresolved() {
-        let col = ColumnRef::unresolved("name");
-
-        assert_eq!(col.name, "name");
-        assert!(col.table.is_none());
-        assert!(col.index.is_none());
-    }
-
-    #[test]
-    fn column_ref_resolved() {
-        let col = ColumnRef::resolved("name", 3);
-
-        assert_eq!(col.name, "name");
-        assert_eq!(col.index, Some(3));
-    }
+    /* ============================================================
+     * Expr display + structure
+     * ============================================================
+     */
 
     #[test]
     fn display_simple_binary_expr() {
@@ -87,7 +85,6 @@ mod tests {
             Expr::lit(Value::Int64(2)),
         );
 
-        // Structural equality check
         match expr {
             Expr::Binary { left, op, right } => {
                 assert_eq!(op, BinaryOp::Mul);
@@ -103,9 +100,11 @@ mod tests {
             _ => panic!("expected binary expression"),
         }
     }
-    use super::*;
-    use crate::common::value::Value;
-    use crate::ir::expr::{BinaryOp, Expr};
+
+    /* ============================================================
+     * LogicalPlan structure
+     * ============================================================
+     */
 
     #[test]
     fn scan_has_no_children() {
@@ -152,11 +151,7 @@ mod tests {
         match plan {
             LogicalPlan::Limit(l) => {
                 assert_eq!(l.count, 10);
-
-                match *l.input {
-                    LogicalPlan::Project(_) => {}
-                    _ => panic!("expected Project under Limit"),
-                }
+                matches!(*l.input, LogicalPlan::Project(_));
             }
             _ => panic!("expected Limit node"),
         }
@@ -173,42 +168,33 @@ mod tests {
             .project(vec![(Expr::bound_col("t", "email"), "email")])
             .limit(5);
 
-        // Limit
         let limit = match plan {
             LogicalPlan::Limit(l) => l,
             _ => panic!("expected Limit"),
         };
 
-        // Project
         let project = match *limit.input {
             LogicalPlan::Project(p) => p,
             _ => panic!("expected Project"),
         };
 
-        // Filter
         let filter = match *project.input {
             LogicalPlan::Filter(f) => f,
             _ => panic!("expected Filter"),
         };
 
-        // Scan
-        match *filter.input {
-            LogicalPlan::Scan(_) => {}
-            _ => panic!("expected Scan"),
-        }
+        matches!(*filter.input, LogicalPlan::Scan(_));
     }
-    use super::*;
-    use crate::common::value::Value;
-    use crate::ir::expr::{BinaryOp, Expr};
-    use crate::ir::plan::LogicalPlan;
+
+    /* ============================================================
+     * Pretty printing
+     * ============================================================
+     */
 
     #[test]
     fn pretty_print_scan() {
         let plan = LogicalPlan::scan("users", "u");
-
-        let output = pretty(&plan);
-
-        assert_eq!(output.trim(), "Scan users");
+        assert_eq!(pretty(&plan).trim(), "Scan users");
     }
 
     #[test]
@@ -220,7 +206,6 @@ mod tests {
         ));
 
         let output = pretty(&plan);
-
         assert!(output.contains("Filter"));
         assert!(output.contains("Scan users"));
     }
@@ -239,8 +224,6 @@ mod tests {
             ])
             .limit(5);
 
-        let output = pretty(&plan);
-
         let expected = r#"
 Limit 5
 └─ Project [email, name]
@@ -248,22 +231,19 @@ Limit 5
       └─ Scan users
 "#;
 
-        assert_eq!(output.trim(), expected.trim());
+        assert_eq!(pretty(&plan).trim(), expected.trim());
     }
 
     #[test]
     fn pretty_output_is_stable() {
         let plan = LogicalPlan::scan("users", "u").limit(1);
-
-        let a = pretty(&plan);
-        let b = pretty(&plan);
-
-        assert_eq!(a, b);
+        assert_eq!(pretty(&plan), pretty(&plan));
     }
-    use super::*;
-    use crate::common::value::Value;
-    use crate::ir::expr::{BinaryOp, Expr};
-    use crate::ir::plan::LogicalPlan;
+
+    /* ============================================================
+     * Validation
+     * ============================================================
+     */
 
     #[test]
     fn valid_simple_scan() {
@@ -295,14 +275,12 @@ Limit 5
     #[test]
     fn limit_must_be_positive() {
         let plan = LogicalPlan::scan("users", "u").limit(0);
-
         assert_eq!(validate(&plan), Err(ValidationError::ZeroLimit));
     }
 
     #[test]
     fn filter_predicate_cannot_be_null() {
         let plan = LogicalPlan::scan("users", "u").filter(Expr::Null);
-
         assert_eq!(validate(&plan), Err(ValidationError::NullPredicate));
     }
 

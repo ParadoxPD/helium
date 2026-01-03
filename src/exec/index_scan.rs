@@ -1,25 +1,30 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use crate::{
-    common::value::Value,
+    common::{
+        schema::{Column, Schema},
+        value::Value,
+    },
     exec::operator::{Operator, Row},
-    frontend::sql::binder::Column,
     ir::plan::IndexPredicate,
     storage::{
         btree::node::{Index, IndexKey},
         page::{RowId, StorageRow},
-        table::Table,
+        table::HeapTable,
     },
 };
 
 pub struct IndexScanExec<'a> {
-    table: Arc<dyn Table + 'a>,
+    table: Arc<HeapTable>,
     index: Arc<Mutex<dyn Index + 'a>>,
     predicate: IndexPredicate,
 
     table_alias: String,
-    column: Column,
-    schema: Vec<String>,
+    column_name: String,
+    schema: Schema,
 
     rids: Vec<RowId>,
     pos: usize,
@@ -27,19 +32,19 @@ pub struct IndexScanExec<'a> {
 
 impl<'a> IndexScanExec<'a> {
     pub fn new(
-        table: Arc<dyn Table + 'a>,
+        table: Arc<HeapTable>,
         table_alias: String,
         index: Arc<Mutex<dyn Index + 'a>>,
         predicate: IndexPredicate,
-        column: Column,
-        schema: Vec<String>,
+        column_name: String,
+        schema: Schema,
     ) -> Self {
         Self {
             table,
             index,
             predicate,
             table_alias,
-            column,
+            column_name,
             schema,
             rids: Vec::new(),
             pos: 0,
@@ -101,16 +106,17 @@ impl<'a> Operator for IndexScanExec<'a> {
             let col_idx = self
                 .table
                 .schema()
+                .columns
                 .iter()
-                .position(|c| c == &self.column)
+                .position(|c| c.name == self.column_name)
                 .unwrap();
 
             if Self::predicate_matches(&storage, col_idx, &self.predicate) {
-                let mut row = Row::new();
+                let mut row = HashMap::new();
 
-                if self.schema.len() == 1 && self.schema[0] == "*" {
+                if self.schema.columns.len() == 1 && self.schema.columns[0].name == "*" {
                     // SELECT *
-                    for (i, col) in self.table.schema().iter().enumerate() {
+                    for (i, col) in self.table.schema().columns.iter().enumerate() {
                         row.insert(
                             format!("{}.{}", self.table_alias, col.name),
                             storage.values[i].clone(),
@@ -118,16 +124,19 @@ impl<'a> Operator for IndexScanExec<'a> {
                     }
                 } else {
                     // explicit projection
-                    for (i, col) in self.schema.iter().enumerate() {
+                    for (i, col) in self.schema.columns.iter().enumerate() {
                         row.insert(
-                            format!("{}.{}", self.table_alias, col),
+                            format!("{}.{}", self.table_alias, col.name),
                             storage.values[i].clone(),
                         );
                     }
                 }
                 println!("ROWS in Index Scan = {:?}", row);
 
-                return Some(row);
+                return Some(Row {
+                    row_id: rid,
+                    values: row,
+                });
             }
         }
     }

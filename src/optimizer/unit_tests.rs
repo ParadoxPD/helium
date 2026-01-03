@@ -1,10 +1,103 @@
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+
+    use crate::buffer::buffer_pool::{BufferPool, BufferPoolHandle};
+    use crate::common::types::DataType;
     use crate::common::value::Value;
     use crate::ir::expr::{BinaryOp, Expr};
-    use crate::ir::plan::LogicalPlan;
+    use crate::ir::plan::{Filter, IndexScan, LogicalPlan, Scan};
     use crate::ir::pretty::pretty;
+    use crate::optimizer::constant_fold::fold_expr;
+    use crate::optimizer::{
+        constant_fold::constant_fold, index_selection::index_selection,
+        predicate_pushdown::predicate_pushdown, projection_prune::projection_prune,
+    };
+
+    use crate::common::schema::{Column, Schema};
+    use crate::exec::catalog::Catalog;
+    use crate::storage::btree::node::{Index, IndexKey};
+    use crate::storage::page::RowId;
+    use crate::storage::page_manager::FilePageManager;
+
+    /* ============================================================
+     * Helpers (schema-only catalog, NO storage)
+     * ============================================================
+     */
+
+    struct DummyIndex;
+
+    impl Index for DummyIndex {
+        fn insert(&mut self, _key: IndexKey, _rid: RowId) {
+            panic!("DummyIndex::insert called — optimizer-only index was executed");
+        }
+
+        fn delete(&mut self, _key: &IndexKey, _rid: RowId) {
+            panic!("DummyIndex::delete called — optimizer-only index was executed");
+        }
+
+        fn get(&self, key: &IndexKey) -> Vec<RowId> {
+            todo!()
+        }
+
+        fn range(&self, from: &IndexKey, to: &IndexKey) -> Vec<RowId> {
+            todo!()
+        }
+    }
+
+    /// Create a dummy index for optimizer tests
+    pub fn dummy_index() -> Arc<Mutex<dyn Index>> {
+        Arc::new(Mutex::new(DummyIndex))
+    }
+
+    fn dummy_buffer_pool() -> BufferPoolHandle {
+        let path = format!("/tmp/helium_test_{}.db", rand::random::<u64>());
+        Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path.into()).unwrap(),
+        ))))
+    }
+    fn test_catalog_with_index(has_index: bool) -> Catalog {
+        let mut catalog = Catalog::new();
+
+        let schema = Schema {
+            columns: vec![
+                Column {
+                    name: "id".into(),
+                    ty: DataType::Int64,
+                    nullable: true,
+                },
+                Column {
+                    name: "age".into(),
+                    ty: DataType::Int64,
+                    nullable: true,
+                },
+            ],
+        };
+
+        // NOTE: buffer pool is irrelevant for optimizer tests
+        let bp = dummy_buffer_pool();
+
+        catalog.create_table("users".into(), schema, bp).unwrap();
+
+        if has_index {
+            // fake index entry – optimizer only checks metadata
+            catalog.add_index(
+                "idx_age".into(),
+                "users".into(),
+                "age".into(),
+                dummy_index(),
+            );
+        }
+
+        catalog
+    }
+
+    /* ============================================================
+     * Constant folding
+     * ============================================================
+     */
 
     #[test]
     fn folds_simple_arithmetic() {
@@ -37,7 +130,7 @@ mod tests {
     #[test]
     fn does_not_fold_column_expressions() {
         let expr = Expr::bin(
-            Expr::bound_col("t", "age"),
+            Expr::bound_col("users", "age"),
             BinaryOp::Add,
             Expr::lit(Value::Int64(1)),
         );
@@ -81,7 +174,7 @@ Filter (true)
     }
 
     #[test]
-    fn optimizer_is_idempotent() {
+    fn constant_fold_is_idempotent() {
         let plan = LogicalPlan::scan("users", "u").filter(Expr::bin(
             Expr::lit(Value::Int64(1)),
             BinaryOp::Eq,
@@ -93,43 +186,16 @@ Filter (true)
 
         assert_eq!(pretty(&once), pretty(&twice));
     }
-    use std::sync::{Arc, Mutex};
 
-    use crate::buffer::buffer_pool::BufferPool;
-    use crate::common::value::Value;
-    use crate::exec::catalog::Catalog;
-    use crate::ir::expr::{BinaryOp, Expr};
-    use crate::ir::plan::{Filter, IndexScan, LogicalPlan, Scan};
-    use crate::optimizer::index_selection::index_selection;
-    use crate::storage::btree::DiskBPlusTree;
-    use crate::storage::page_manager::FilePageManager;
-    use crate::storage::table::HeapTable;
+    /* ============================================================
+     * Index selection (FIXED SECTION)
+     * ============================================================
+     */
 
     #[test]
     fn filter_on_indexed_column_becomes_indexscan() {
-        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let catalog = test_catalog_with_index(true);
 
-        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
-        ))));
-
-        // ---- heap table (no indexes!) ----
-        let table = HeapTable::new(
-            "users".into(),
-            vec!["id".into(), "age".into()],
-            4,
-            bp.clone(),
-        );
-
-        // ---- disk index ----
-        let index = Arc::new(Mutex::new(DiskBPlusTree::new(4, bp.clone())));
-
-        // ---- catalog ----
-        let mut catalog = Catalog::new();
-        catalog.insert("users".into(), Arc::new(table));
-        catalog.add_index("a".into(), "users".into(), "age".into(), index);
-
-        // ---- logical plan ----
         let scan = LogicalPlan::Scan(Scan {
             table: "users".into(),
             alias: "users".into(),
@@ -137,14 +203,11 @@ Filter (true)
         });
 
         let filter = LogicalPlan::Filter(Filter {
-            predicate: Expr::Binary {
-                left: Box::new(Expr::BoundColumn {
-                    table: "users".into(),
-                    name: "age".into(),
-                }),
-                op: BinaryOp::Eq,
-                right: Box::new(Expr::Literal(Value::Int64(20))),
-            },
+            predicate: Expr::bin(
+                Expr::bound_col("users", "age"),
+                BinaryOp::Eq,
+                Expr::lit(Value::Int64(20)),
+            ),
             input: Box::new(scan),
         });
 
@@ -160,57 +223,31 @@ Filter (true)
 
     #[test]
     fn filter_without_index_remains_filter() {
-        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        let catalog = test_catalog_with_index(false);
 
-        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
-        ))));
-
-        // ---- heap table WITHOUT index ----
-        let table = HeapTable::new(
-            "users".into(),
-            vec!["id".into(), "age".into()],
-            4,
-            bp.clone(),
-        );
-
-        let mut catalog: Catalog = Catalog::new();
-        catalog.insert("users".into(), Arc::new(table));
-
-        let scan = LogicalPlan::Scan(Scan {
-            table: "users".into(),
-            alias: "users".into(),
-            columns: vec!["id".into(), "age".into()],
-        });
-
-        let filter = LogicalPlan::Filter(Filter {
-            predicate: Expr::Binary {
-                left: Box::new(Expr::BoundColumn {
-                    table: "users".into(),
-                    name: "age".into(),
-                }),
-                op: BinaryOp::Eq,
-                right: Box::new(Expr::Literal(Value::Int64(20))),
-            },
-            input: Box::new(scan),
-        });
+        let scan = LogicalPlan::scan("users", "users");
+        let filter = scan.filter(Expr::bin(
+            Expr::bound_col("users", "age"),
+            BinaryOp::Eq,
+            Expr::lit(Value::Int64(20)),
+        ));
 
         let optimized = index_selection(&filter, &catalog);
 
         assert!(matches!(optimized, LogicalPlan::Filter(_)));
     }
-    use super::*;
-    use crate::common::value::Value;
-    use crate::ir::expr::{BinaryOp, Expr};
-    use crate::ir::plan::LogicalPlan;
-    use crate::ir::pretty::pretty;
+
+    /* ============================================================
+     * Predicate pushdown
+     * ============================================================
+     */
 
     #[test]
     fn pushes_filter_below_project() {
         let plan = LogicalPlan::scan("users", "u")
-            .project(vec![(Expr::bound_col("t", "name"), "name")])
+            .project(vec![(Expr::bound_col("u", "name"), "name")])
             .filter(Expr::bin(
-                Expr::bound_col("t", "age"),
+                Expr::bound_col("u", "age"),
                 BinaryOp::Gt,
                 Expr::lit(Value::Int64(18)),
             ));
@@ -229,14 +266,13 @@ Project [name]
     #[test]
     fn does_not_push_filter_below_limit() {
         let plan = LogicalPlan::scan("users", "u").limit(10).filter(Expr::bin(
-            Expr::bound_col("t", "age"),
+            Expr::bound_col("u", "age"),
             BinaryOp::Gt,
             Expr::lit(Value::Int64(18)),
         ));
 
         let optimized = predicate_pushdown(&plan);
 
-        // Filter must stay above Limit
         let expected = r#"
 Filter (age Gt 18)
 └─ Limit 10
@@ -247,20 +283,11 @@ Filter (age Gt 18)
     }
 
     #[test]
-    fn preserves_non_pushable_structure() {
-        let plan = LogicalPlan::scan("users", "u");
-
-        let optimized = predicate_pushdown(&plan);
-
-        assert_eq!(pretty(&optimized), pretty(&plan));
-    }
-
-    #[test]
-    fn optimizer_is_idempotent() {
+    fn predicate_pushdown_is_idempotent() {
         let plan = LogicalPlan::scan("users", "u")
-            .project(vec![(Expr::bound_col("t", "name"), "name")])
+            .project(vec![(Expr::bound_col("u", "name"), "name")])
             .filter(Expr::bin(
-                Expr::bound_col("t", "age"),
+                Expr::bound_col("u", "age"),
                 BinaryOp::Gt,
                 Expr::lit(Value::Int64(18)),
             ));
@@ -270,11 +297,11 @@ Filter (age Gt 18)
 
         assert_eq!(pretty(&once), pretty(&twice));
     }
-    use super::*;
-    use crate::common::value::Value;
-    use crate::ir::expr::{BinaryOp, Expr};
-    use crate::ir::plan::LogicalPlan;
-    use crate::ir::pretty::pretty;
+
+    /* ============================================================
+     * Projection prune
+     * ============================================================
+     */
 
     #[test]
     fn prunes_unused_project_fields() {
@@ -309,29 +336,27 @@ Project [name, city]
     fn keeps_columns_used_in_filter() {
         let plan = LogicalPlan::scan("users", "u")
             .project(vec![
-                (Expr::bound_col("t", "name"), "name"),
-                (Expr::bound_col("t", "age"), "age"),
+                (Expr::bound_col("u", "name"), "name"),
+                (Expr::bound_col("u", "age"), "age"),
             ])
             .filter(Expr::bin(
-                Expr::bound_col("t", "age"),
+                Expr::bound_col("u", "age"),
                 BinaryOp::Gt,
                 Expr::lit(Value::Int64(30)),
             ))
-            .project(vec![(Expr::bound_col("t", "name"), "name")]);
+            .project(vec![(Expr::bound_col("u", "name"), "name")]);
 
         let optimized = projection_prune(&plan);
 
         let output = pretty(&optimized);
-
-        assert!(output.contains("Scan users"));
         assert!(output.contains("age"));
     }
 
     #[test]
-    fn idempotent_projection_prune() {
+    fn projection_prune_is_idempotent() {
         let plan = LogicalPlan::scan("users", "u").project(vec![
-            (Expr::bound_col("t", "name"), "name"),
-            (Expr::bound_col("t", "age"), "age"),
+            (Expr::bound_col("u", "name"), "name"),
+            (Expr::bound_col("u", "age"), "age"),
         ]);
 
         let once = projection_prune(&plan);

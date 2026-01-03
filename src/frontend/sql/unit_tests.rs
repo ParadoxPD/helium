@@ -1,8 +1,15 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::buffer_pool::BufferPoolHandle;
+    use crate::common::schema::{Column, Schema};
+    use crate::common::types::DataType;
     use crate::exec::catalog::Catalog;
+    use crate::frontend::sql::ast::{FromItem, Statement};
+    use crate::frontend::sql::binder::{BindError, Binder, BoundStatement};
+    use crate::frontend::sql::lower::{Lowered, lower_stmt};
     use crate::frontend::sql::parser::parse;
+    use crate::ir::pretty::pretty;
     use crate::storage::table::HeapTable;
     use crate::{buffer::buffer_pool::BufferPool, storage::page_manager::FilePageManager};
     use std::sync::{Arc, Mutex};
@@ -10,62 +17,89 @@ mod tests {
     fn test_catalog() -> Catalog {
         let mut catalog = Catalog::new();
 
-        let path = format!("/tmp/db_{}.db", rand::random::<u64>());
+        // Fake schema-only tables for binder tests
+        catalog
+            .create_table(
+                "users".into(),
+                Schema {
+                    columns: vec![
+                        Column {
+                            name: "id".into(),
+                            ty: DataType::Int64,
+                            nullable: true,
+                        },
+                        Column {
+                            name: "name".into(),
+                            ty: DataType::String,
+                            nullable: true,
+                        },
+                    ],
+                },
+                dummy_buffer_pool(),
+            )
+            .unwrap();
 
-        let bp = Arc::new(Mutex::new(BufferPool::new(Box::new(
-            FilePageManager::open(&path).unwrap(),
-        ))));
-
-        // -------- create table --------
-        let user_schema = vec!["id".into(), "name".into()];
-        let mut users_table = HeapTable::new("users".into(), user_schema.clone(), 4, bp.clone());
-
-        catalog.insert("users".into(), Arc::new(users_table));
-
-        let order_schema = vec!["user_id".into()];
-        let mut orders_table = HeapTable::new("users".into(), order_schema.clone(), 4, bp.clone());
-        catalog.insert("orders".into(), Arc::new(orders_table));
+        catalog
+            .create_table(
+                "orders".into(),
+                Schema {
+                    columns: vec![Column {
+                        name: "user_id".into(),
+                        ty: DataType::Int64,
+                        nullable: true,
+                    }],
+                },
+                dummy_buffer_pool(),
+            )
+            .unwrap();
 
         catalog
     }
 
+    fn bind(sql: &str) -> Result<BoundStatement, BindError> {
+        let stmt = parse(sql).unwrap();
+        let catalog = test_catalog();
+        let mut binder = Binder::new(&catalog);
+        binder.bind_statement(stmt)
+    }
+
+    fn dummy_buffer_pool() -> BufferPoolHandle {
+        let path = format!("/tmp/helium_test_{}.db", rand::random::<u64>());
+        Arc::new(Mutex::new(BufferPool::new(Box::new(
+            FilePageManager::open(&path.into()).unwrap(),
+        ))))
+    }
+
     #[test]
     fn binds_simple_column() {
-        let stmt = parse("SELECT id FROM users;");
-        let catalog = test_catalog();
+        let bound = bind("SELECT id FROM users;").unwrap();
 
-        let bound = match stmt {
-            crate::frontend::sql::ast::Statement::Select(s) => Binder::bind(s, &catalog).unwrap(),
-            _ => panic!(),
-        };
-
-        assert!(bound.where_clause.is_none());
+        match bound {
+            BoundStatement::Select(select) => {
+                assert!(select.where_clause.is_none());
+                assert_eq!(select.columns.len(), 1);
+            }
+            _ => panic!("expected BoundSelect"),
+        }
     }
 
     #[test]
     fn errors_on_ambiguous_column() {
-        let stmt = parse("SELECT id FROM users u JOIN orders o ON u.id = o.user_id;");
-        let catalog = test_catalog();
-
-        let res = match stmt {
-            crate::frontend::sql::ast::Statement::Select(s) => Binder::bind(s, &catalog),
-            _ => panic!(),
-        };
+        let res = bind("SELECT id FROM users u JOIN orders o ON u.id = o.user_id;");
 
         assert!(matches!(res, Err(BindError::AmbiguousColumn(_))));
     }
 
     #[test]
     fn binds_qualified_column() {
-        let stmt = parse("SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id;");
-        let catalog = test_catalog();
+        let bound = bind("SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id;").unwrap();
 
-        let bound = match stmt {
-            crate::frontend::sql::ast::Statement::Select(s) => Binder::bind(s, &catalog).unwrap(),
-            _ => panic!(),
-        };
-
-        assert_eq!(bound.columns.len(), 1);
+        match bound {
+            BoundStatement::Select(select) => {
+                assert_eq!(select.columns.len(), 1);
+            }
+            _ => panic!("expected BoundSelect"),
+        }
     }
 
     #[test]
@@ -79,12 +113,11 @@ mod tests {
         let sql = "CREATE TABLE t ()";
         assert!(bind(sql).is_err());
     }
-    use super::*;
 
     #[test]
     fn parses_and_predicates() {
         let sql = "SELECT name FROM users WHERE age > 18 AND score > 50;";
-        let stmt = parse(sql);
+        let stmt = parse(sql).unwrap();
         match stmt {
             Statement::Select(select) => {
                 assert!(select.where_clause.is_some());
@@ -95,7 +128,7 @@ mod tests {
 
     #[test]
     fn parses_order_by() {
-        let stmt = parse("SELECT name FROM users ORDER BY age DESC, name ASC;");
+        let stmt = parse("SELECT name FROM users ORDER BY age DESC, name ASC;").unwrap();
         match stmt {
             Statement::Select(s) => {
                 assert_eq!(s.order_by.len(), 2);
@@ -105,16 +138,9 @@ mod tests {
             _ => panic!("expected select"),
         }
     }
-}
-
-#[cfg(test)]
-mod join_tests {
-    use super::*;
-    use crate::frontend::sql::ast::{FromItem, Statement};
-
     #[test]
     fn parses_simple_join() {
-        let stmt = parse("SELECT name FROM users u JOIN orders o ON u.id = o.user_id;");
+        let stmt = parse("SELECT name FROM users u JOIN orders o ON u.id = o.user_id;").unwrap();
 
         match stmt {
             Statement::Select(s) => match s.from {
@@ -134,7 +160,8 @@ mod join_tests {
             "SELECT name FROM users u \
              JOIN orders o ON u.id = o.user_id \
              JOIN payments p ON o.id = p.order_id;",
-        );
+        )
+        .unwrap();
 
         match stmt {
             Statement::Select(s) => match s.from {
@@ -151,7 +178,7 @@ mod join_tests {
     #[test]
     fn parse_create_table() {
         let sql = "CREATE TABLE users (id INT, name TEXT)";
-        let stmt = parse(sql);
+        let stmt = parse(sql).unwrap();
 
         match stmt {
             Statement::CreateTable(ct) => {
@@ -164,18 +191,13 @@ mod join_tests {
 
     #[test]
     fn parse_drop_table() {
-        let stmt = parse("DROP TABLE users");
+        let stmt = parse("DROP TABLE users").unwrap();
         matches!(stmt, Statement::DropTable(_));
     }
-    use super::*;
-    use crate::exec::catalog::Catalog;
-    use crate::frontend::sql::parser::parse;
-    use crate::ir::pretty::pretty;
-
     #[test]
     fn lowers_simple_select() {
         let sql = "SELECT name FROM users;";
-        let stmt = parse(sql);
+        let stmt = parse(sql).unwrap();
         let catalog = Catalog::new();
 
         let lowered = lower_stmt(stmt, &catalog);
@@ -196,7 +218,7 @@ Project [name]
     #[test]
     fn lowers_select_where_limit() {
         let sql = "SELECT name FROM users WHERE age > 18 LIMIT 5;";
-        let stmt = parse(sql);
+        let stmt = parse(sql).unwrap();
         let catalog = Catalog::new();
 
         let lowered = lower_stmt(stmt, &catalog);
@@ -218,7 +240,7 @@ Limit 5
 
     #[test]
     fn explain_select() {
-        let stmt = parse("EXPLAIN SELECT name FROM users;");
+        let stmt = parse("EXPLAIN SELECT name FROM users;").unwrap();
         let catalog = Catalog::new();
 
         let lowered = lower_stmt(stmt, &catalog);
@@ -234,7 +256,7 @@ Limit 5
 
     #[test]
     fn lowers_order_by() {
-        let stmt = parse("SELECT name FROM users ORDER BY age DESC;");
+        let stmt = parse("SELECT name FROM users ORDER BY age DESC;").unwrap();
         let catalog = Catalog::new();
 
         let lowered = lower_stmt(stmt, &catalog);
@@ -250,7 +272,7 @@ Limit 5
 
     #[test]
     fn lowers_join_into_logical_plan() {
-        let stmt = parse("SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id;");
+        let stmt = parse("SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id;").unwrap();
         let catalog = Catalog::new();
 
         let lowered = lower_stmt(stmt, &catalog);

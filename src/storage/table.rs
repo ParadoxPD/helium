@@ -1,34 +1,30 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+
+use anyhow::{Result, bail};
 
 use crate::{
     buffer::buffer_pool::BufferPoolHandle,
     common::{schema::Schema, value::Value},
+    exec::operator::Row,
     storage::{
         btree::node::Index,
         page::{HeapPageHandle, Page, PageId, RowId, RowPage, StorageRow},
     },
 };
 
-pub trait Table: Send + Sync {
-    fn scan(self: Arc<Self>) -> Box<dyn TableCursor>;
-    fn schema(&self) -> &Schema;
-    fn fetch(&self, rid: RowId) -> StorageRow;
-    fn get_index(&self, column: &str) -> Option<Arc<dyn Index>>;
-    fn delete(&self, rid: RowId) -> bool;
-    fn update(&self, rid: RowId, values: Vec<Value>) -> bool;
-    fn insert(&self, values: Vec<Value>) -> RowId;
-}
-
 pub trait TableCursor {
-    fn next(&mut self) -> Option<StorageRow>;
+    fn next(&mut self) -> Option<(RowId, StorageRow)>;
 }
 
 pub struct HeapTable {
-    name: String,
-    schema: Schema,
-    pages: Mutex<Vec<PageId>>,
+    pub name: String,
+    pub schema: Schema,
+    pub pages: Mutex<Vec<PageId>>,
     page_capacity: usize,
-    bp: BufferPoolHandle,
+    pub bp: BufferPoolHandle,
 }
 
 pub struct HeapTableCursor {
@@ -58,23 +54,24 @@ impl HeapTable {
             bp,
         }
     }
-    pub fn insert_rows(&mut self, rows: Vec<Vec<Value>>) {
+
+    /// Insert multiple fully-materialized physical rows.
+    /// Each row is a Vec<Value> in schema order.
+    pub fn insert_rows(&self, rows: Vec<Vec<Value>>) {
         for row in rows {
             self.insert(row);
         }
     }
-}
 
-impl Table for HeapTable {
-    fn scan(self: Arc<Self>) -> Box<dyn TableCursor> {
-        Box::new(HeapTableCursor::new(self))
+    pub fn scan(self: &Arc<Self>) -> Box<dyn TableCursor> {
+        Box::new(HeapTableCursor::new(Arc::clone(self)))
     }
 
-    fn schema(&self) -> &Schema {
+    pub fn schema(&self) -> &Schema {
         &self.schema
     }
 
-    fn fetch(&self, rid: RowId) -> StorageRow {
+    pub fn fetch(&self, rid: RowId) -> StorageRow {
         let mut bp = self.bp.lock().unwrap();
         let frame = bp.fetch_page(rid.page_id);
         let page = RowPage::from_bytes(rid.page_id, &frame.data);
@@ -85,11 +82,11 @@ impl Table for HeapTable {
         row
     }
 
-    fn get_index(&self, _column: &str) -> Option<Arc<dyn Index>> {
+    pub fn get_index(&self, _column: &str) -> Option<Arc<dyn Index>> {
         None
     }
 
-    fn insert(&self, values: Vec<Value>) -> RowId {
+    pub fn insert(&self, values: Vec<Value>) -> RowId {
         let last_pid = {
             let pages = self.pages.lock().unwrap();
             *pages.last().unwrap()
@@ -123,7 +120,7 @@ impl Table for HeapTable {
         rid
     }
 
-    fn update(&self, rid: RowId, values: Vec<Value>) -> bool {
+    pub fn update(&self, rid: RowId, values: Vec<Value>) -> bool {
         let mut bp = self.bp.lock().unwrap();
 
         let frame = bp.fetch_page(rid.page_id);
@@ -140,7 +137,7 @@ impl Table for HeapTable {
         ok
     }
 
-    fn delete(&self, rid: RowId) -> bool {
+    pub fn delete(&self, rid: RowId) -> bool {
         let mut bp = self.bp.lock().unwrap();
 
         let frame = bp.fetch_page(rid.page_id);
@@ -169,7 +166,7 @@ impl HeapTableCursor {
 }
 
 impl TableCursor for HeapTableCursor {
-    fn next(&mut self) -> Option<StorageRow> {
+    fn next(&mut self) -> Option<(RowId, StorageRow)> {
         loop {
             let pages = self.table.pages.lock().unwrap();
             if self.page_idx >= pages.len() {
@@ -188,12 +185,14 @@ impl TableCursor for HeapTableCursor {
                 let slot = self.slot_idx;
                 self.slot_idx += 1;
 
-                if let Some(mut row) = page.get(slot).cloned() {
-                    row.rid = RowId {
-                        page_id: pid,
-                        slot_id: slot,
-                    };
-                    return Some(row);
+                if let Some(storage_row) = page.get(slot) {
+                    return Some((
+                        RowId {
+                            page_id: pid,
+                            slot_id: slot,
+                        },
+                        storage_row.clone(),
+                    ));
                 }
             }
 

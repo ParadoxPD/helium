@@ -6,13 +6,15 @@ use helpers::harness::TestDB;
 fn projection_pruning_removes_redundant_projects() {
     let mut db = TestDB::new();
 
-    let plan = db.explain(
-        "
+    let plan = db
+        .explain(
+            "
         SELECT name
         FROM users
         WHERE age > 18
     ",
-    );
+        )
+        .unwrap();
 
     assert!(!plan.contains("Project [name, age]"));
     assert!(plan.contains("Scan users"));

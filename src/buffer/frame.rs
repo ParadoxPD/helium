@@ -1,5 +1,6 @@
 use crate::storage::page::PageId;
 
+#[derive(Debug)]
 pub struct BufferFrame {
     pub page: PageFrame,
     pub pin_count: usize,

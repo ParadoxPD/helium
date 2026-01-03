@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::common::value::Value;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -123,4 +125,30 @@ pub enum FromItem {
         right: Box<FromItem>,
         on: Expr,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum ParseError {
+    UnexpectedEOF,
+    UnexpectedToken(String),
+    Expected {
+        expected: String,
+        found: Option<String>,
+    },
+    Unsupported(String),
+    InvalidLiteral(String),
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseError::UnexpectedEOF => write!(f, "Unexpected end of file"),
+            ParseError::UnexpectedToken(tok) => write!(f, "Unexpected token : {}", tok),
+            ParseError::Expected { expected, found } => {
+                write!(f, "Expected : {:?}, Found : {:?}", expected, found)
+            }
+            ParseError::Unsupported(tok) => write!(f, "Unsupported operation : {}", tok),
+            ParseError::InvalidLiteral(tok) => write!(f, "Invalid Literal : {}", tok),
+        }
+    }
 }

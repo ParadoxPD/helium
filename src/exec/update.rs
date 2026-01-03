@@ -1,13 +1,13 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    exec::operator::{Operator, Row},
-    frontend::sql::binder::Column,
-    ir::expr::Expr,
-    storage::{
-        page::StorageRow,
-        table::{HeapTable, Table},
+    common::{schema::Column, value::Value},
+    exec::{
+        expr_eval::eval_value,
+        operator::{Operator, Row},
     },
+    ir::expr::Expr,
+    storage::{page::StorageRow, table::HeapTable},
 };
 
 pub struct UpdateExec {
@@ -22,24 +22,38 @@ impl Operator for UpdateExec {
     }
 
     fn next(&mut self) -> Option<Row> {
-        let row = self.input.next()?;
+        let row = self.input.next()?; // execution Row
 
-        let mut values = row.values.clone();
+        // 1. Start from existing values
+        let mut updated = row.values.clone();
 
+        // 2. Apply assignments using eval_value
         for (col, expr) in &self.assignments {
-            let v = expr.eval(&row.values)?;
-            values.insert(col.name.clone(), v);
+            let v = eval_value(expr, &row);
+            updated.insert(col.name.clone(), v);
         }
 
-        let new_rid = self
-            .table
-            .insert(StorageRow::new(values.into_values().collect()));
-        self.table.delete(row.row_id);
-        let old_rid = row.row_id();
-        let new_rid = self.table.insert(new_row.to_storage_row());
-        self.table.delete(old_rid);
+        // 3. Convert HashMap -> Vec<Value> in schema order
+        let mut values = Vec::with_capacity(self.table.schema().columns.len());
+        for col in &self.table.schema().columns {
+            values.push(
+                updated
+                    .get(&format!("{}.{}", self.table.name, col.name))
+                    .or_else(|| updated.get(&col.name))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            );
+        }
 
-        Some(Row::from_row_id(new_rid))
+        // 4. Copy-on-write: insert new row, delete old
+        let new_rid = self.table.insert(values);
+        self.table.delete(row.row_id);
+
+        // 5. Return execution Row with new RowId
+        Some(Row {
+            row_id: new_rid,
+            values: HashMap::new(), // projection will rebuild this
+        })
     }
 
     fn close(&mut self) {

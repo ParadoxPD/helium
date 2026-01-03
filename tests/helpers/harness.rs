@@ -1,10 +1,7 @@
 use helium::api::db::{Database, QueryResult};
 use helium::exec::operator::Row;
 
-use helium::{
-    exec::statement::execute_statement,
-    frontend::sql::{binder::Binder, parser::parse},
-};
+use helium::frontend::sql::{binder::Binder, parser::parse};
 
 pub struct TestDB {
     pub db: Database,
@@ -17,17 +14,15 @@ impl TestDB {
         Self { db }
     }
 
+    /// Execute any SQL statement.
+    /// This is the *only* entry point tests should use.
     pub fn exec(&mut self, sql: &str) -> Result<QueryResult, anyhow::Error> {
-        let stmt = parse(sql);
-        let binder = Binder::new(&self.db.catalog);
-        Ok(execute_statement(
-            stmt,
-            &mut self.db.catalog,
-            &binder,
-            self.db.buffer_pool.clone(),
-        )?)
+        self.db
+            .run_query(sql)
+            .map_err(|e| anyhow::anyhow!("{:?}", e))
     }
 
+    /// Execute a SELECT and return rows.
     pub fn query(&mut self, sql: &str) -> Result<Vec<helium::exec::operator::Row>, anyhow::Error> {
         match self.exec(sql)? {
             QueryResult::Rows(rows) => Ok(rows),
@@ -35,17 +30,19 @@ impl TestDB {
         }
     }
 
-    pub fn explain(&mut self, sql: &str) -> String {
-        match self.exec(&format!("EXPLAIN {sql}")).unwrap() {
-            QueryResult::Explain(s) => s,
-            other => panic!("Expected EXPLAIN, got {:?}", other),
+    /// EXPLAIN without ANALYZE
+    pub fn explain(&mut self, sql: &str) -> Result<String, anyhow::Error> {
+        match self.exec(&format!("EXPLAIN {sql}"))? {
+            QueryResult::Explain(s) => Ok(s),
+            other => anyhow::bail!("Expected EXPLAIN, got {:?}", other),
         }
     }
 
-    pub fn explain_analyze(&mut self, sql: &str) -> String {
-        match self.exec(&format!("EXPLAIN ANALYZE {sql}")).unwrap() {
-            QueryResult::Explain(s) => s,
-            other => panic!("Expected EXPLAIN ANALYZE, got {:?}", other),
+    /// EXPLAIN ANALYZE
+    pub fn explain_analyze(&mut self, sql: &str) -> Result<String, anyhow::Error> {
+        match self.exec(&format!("EXPLAIN ANALYZE {sql}"))? {
+            QueryResult::Explain(s) => Ok(s),
+            other => anyhow::bail!("Expected EXPLAIN ANALYZE, got {:?}", other),
         }
     }
 }

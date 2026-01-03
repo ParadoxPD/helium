@@ -76,7 +76,7 @@ mod tests {
             QueryResult::Rows(results) => {
                 assert_eq!(results.len(), 1);
                 assert_eq!(
-                    results[0].values.get("users.name"),
+                    results[0].values.get("name"),
                     Some(&Value::String("Alice".into()))
                 );
             }
@@ -101,7 +101,7 @@ mod tests {
         match exec(&mut db, "SELECT name FROM users ORDER BY age ASC") {
             QueryResult::Rows(rows) => {
                 assert_eq!(
-                    rows[0].values.get("users.name"),
+                    rows[0].values.get("name"),
                     Some(&Value::String("Alice".into()))
                 );
             }
@@ -129,12 +129,12 @@ mod tests {
 
         match exec(
             &mut db,
-            "SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id",
+            "SELECT name FROM users u JOIN orders o ON u.id = o.user_id",
         ) {
             QueryResult::Rows(rows) => {
                 assert_eq!(rows.len(), 1);
                 assert_eq!(
-                    rows[0].values.get("u.name"),
+                    rows[0].values.get("name"),
                     Some(&Value::String("Alice".into()))
                 );
             }
@@ -171,7 +171,7 @@ mod tests {
         match exec(&mut db, "SELECT * FROM users WHERE age = 20") {
             QueryResult::Rows(rows) => {
                 assert_eq!(rows.len(), 1);
-                assert_eq!(rows[0].values.get("users.age"), Some(&Value::Int64(20)));
+                assert_eq!(rows[0].values.get("age"), Some(&Value::Int64(20)));
             }
             _ => panic!("expected rows"),
         }

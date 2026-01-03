@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::db::QueryError;
     use crate::buffer::buffer_pool::BufferPoolHandle;
     use crate::common::schema::{Column, Schema};
     use crate::common::types::DataType;
@@ -12,6 +13,7 @@ mod tests {
     use crate::ir::pretty::pretty;
     use crate::storage::table::HeapTable;
     use crate::{buffer::buffer_pool::BufferPool, storage::page_manager::FilePageManager};
+    use std::error::Error;
     use std::sync::{Arc, Mutex};
 
     fn test_catalog() -> Catalog {
@@ -25,6 +27,11 @@ mod tests {
                     columns: vec![
                         Column {
                             name: "id".into(),
+                            ty: DataType::Int64,
+                            nullable: true,
+                        },
+                        Column {
+                            name: "age".into(),
                             ty: DataType::Int64,
                             nullable: true,
                         },
@@ -56,11 +63,12 @@ mod tests {
         catalog
     }
 
-    fn bind(sql: &str) -> Result<BoundStatement, BindError> {
-        let stmt = parse(sql).unwrap();
+    fn bind(sql: &str) -> Result<BoundStatement, QueryError> {
+        let stmt = parse(sql)?;
         let catalog = test_catalog();
         let mut binder = Binder::new(&catalog);
-        binder.bind_statement(stmt)
+        let bound = binder.bind_statement(stmt)?;
+        Ok(bound)
     }
 
     fn dummy_buffer_pool() -> BufferPoolHandle {
@@ -85,9 +93,13 @@ mod tests {
 
     #[test]
     fn errors_on_ambiguous_column() {
-        let res = bind("SELECT id FROM users u JOIN orders o ON u.id = o.user_id;");
+        let res = bind("SELECT id FROM users u JOIN users o ON u.id = o.id;");
+        println!("{:?}", res);
 
-        assert!(matches!(res, Err(BindError::AmbiguousColumn(_))));
+        assert!(matches!(
+            res,
+            Err(QueryError::Bind(BindError::AmbiguousColumn(_)))
+        ));
     }
 
     #[test]
@@ -197,10 +209,7 @@ mod tests {
     #[test]
     fn lowers_simple_select() {
         let sql = "SELECT name FROM users;";
-        let stmt = parse(sql).unwrap();
-        let catalog = Catalog::new();
-
-        let lowered = lower_stmt(stmt, &catalog);
+        let lowered = lower_stmt(bind(sql).unwrap());
 
         let expected = r#"
 Project [name]
@@ -218,10 +227,8 @@ Project [name]
     #[test]
     fn lowers_select_where_limit() {
         let sql = "SELECT name FROM users WHERE age > 18 LIMIT 5;";
-        let stmt = parse(sql).unwrap();
-        let catalog = Catalog::new();
 
-        let lowered = lower_stmt(stmt, &catalog);
+        let lowered = lower_stmt(bind(sql).unwrap());
 
         let expected = r#"
 Limit 5
@@ -240,10 +247,9 @@ Limit 5
 
     #[test]
     fn explain_select() {
-        let stmt = parse("EXPLAIN SELECT name FROM users;").unwrap();
-        let catalog = Catalog::new();
+        let sql = "EXPLAIN SELECT name FROM users;";
 
-        let lowered = lower_stmt(stmt, &catalog);
+        let lowered = lower_stmt(bind(sql).unwrap());
 
         match lowered {
             Lowered::Explain { analyze, plan } => {
@@ -256,10 +262,9 @@ Limit 5
 
     #[test]
     fn lowers_order_by() {
-        let stmt = parse("SELECT name FROM users ORDER BY age DESC;").unwrap();
-        let catalog = Catalog::new();
+        let sql = "SELECT name FROM users ORDER BY age DESC;";
 
-        let lowered = lower_stmt(stmt, &catalog);
+        let lowered = lower_stmt(bind(sql).unwrap());
 
         match lowered {
             Lowered::Plan(plan) => {
@@ -272,10 +277,8 @@ Limit 5
 
     #[test]
     fn lowers_join_into_logical_plan() {
-        let stmt = parse("SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id;").unwrap();
-        let catalog = Catalog::new();
-
-        let lowered = lower_stmt(stmt, &catalog);
+        let sql = "SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id;";
+        let lowered = lower_stmt(bind(sql).unwrap());
 
         match lowered {
             Lowered::Plan(plan) => {

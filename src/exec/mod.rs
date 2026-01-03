@@ -35,9 +35,9 @@ pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
     match plan {
         LogicalPlan::Scan(scan) => {
             let table = catalog.get_table(&scan.table).expect("table not found");
+            let alias = scan.alias.clone();
 
-            let scan_exec =
-                ScanExec::new(table.heap.clone(), scan.alias.clone(), scan.columns.clone());
+            let scan_exec = ScanExec::new(table.heap.clone(), alias, scan.columns.clone());
             Box::new(scan_exec)
         }
 

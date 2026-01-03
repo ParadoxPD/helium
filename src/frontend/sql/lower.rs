@@ -22,49 +22,19 @@ pub enum Lowered {
     },
 }
 
-pub fn lower_stmt(stmt: Statement, catalog: &Catalog) -> Lowered {
-    match stmt {
-        Statement::Explain { analyze, stmt } => {
-            let inner = lower_stmt(*stmt, catalog);
-            match inner {
-                Lowered::Plan(plan) => Lowered::Explain { analyze, plan },
-                _ => unreachable!("EXPLAIN can only wrap a plan"),
-            }
-        }
+pub fn lower_stmt(bound: BoundStatement) -> Lowered {
+    match bound {
+        BoundStatement::Select(s) => Lowered::Plan(lower_select(s)),
 
-        // SELECT goes through binder → logical plan
-        Statement::Select(_) => {
-            let mut binder = Binder::new(catalog);
+        BoundStatement::CreateIndex(ci) => Lowered::CreateIndex {
+            name: ci.name,
+            table: ci.table,
+            column: ci.column,
+        },
 
-            match binder.bind_statement(stmt).expect("bind error") {
-                BoundStatement::Select(bound) => Lowered::Plan(lower_select(bound)),
-                _ => unreachable!("SELECT must bind to BoundSelect"),
-            }
-        }
+        BoundStatement::DropIndex(di) => Lowered::DropIndex { name: di.name },
 
-        // CREATE INDEX must be validated by binder
-        Statement::CreateIndex {
-            name,
-            table,
-            column,
-        } => {
-            let mut binder = Binder::new(catalog);
-
-            // validate table + column existence
-            binder.tables.insert(table.clone(), table.clone());
-            binder.resolve_column(&table, &column).expect("bind error");
-
-            Lowered::CreateIndex {
-                name,
-                table,
-                column,
-            }
-        }
-
-        // DROP INDEX is syntactic for now
-        Statement::DropIndex { name } => Lowered::DropIndex { name },
-
-        _ => panic!("statement not lowered here"),
+        _ => panic!("statement should not reach lowering"),
     }
 }
 

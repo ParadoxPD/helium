@@ -75,7 +75,7 @@ mod tests {
         match exec_sql(&mut db, "SELECT age FROM users WHERE age > 18") {
             QueryResult::Rows(rows) => {
                 assert_eq!(rows.len(), 1);
-                assert_eq!(rows[0].values.get("users.age"), Some(&Value::Int64(30)));
+                assert_eq!(rows[0].values.get("age"), Some(&Value::Int64(30)));
             }
             _ => panic!("expected rows"),
         }
@@ -94,8 +94,8 @@ mod tests {
 
         match exec_sql(&mut db, "SELECT age FROM users") {
             QueryResult::Rows(rows) => {
-                assert!(rows[0].values.contains_key("users.age"));
-                assert!(!rows[0].values.contains_key("users.id"));
+                assert!(rows[0].values.contains_key("age"));
+                assert!(!rows[0].values.contains_key("id"));
             }
             _ => panic!("expected rows"),
         }
@@ -169,11 +169,11 @@ mod tests {
             QueryResult::Rows(rows) => {
                 assert_eq!(rows.len(), 2);
                 assert_eq!(
-                    rows[0].values.get("users.name"),
+                    rows[0].values.get("name"),
                     Some(&Value::String("Alice".into()))
                 );
                 assert_eq!(
-                    rows[1].values.get("users.name"),
+                    rows[1].values.get("name"),
                     Some(&Value::String("Carol".into()))
                 );
             }
@@ -201,7 +201,7 @@ mod tests {
         match result {
             QueryResult::Rows(rows) => {
                 assert_eq!(rows.len(), 1);
-                assert_eq!(rows[0].values.get("users.x"), Some(&Value::Int64(2)));
+                assert_eq!(rows[0].values.get("x"), Some(&Value::Int64(2)));
             }
             _ => panic!("expected rows"),
         }
@@ -225,7 +225,7 @@ mod tests {
         match result {
             QueryResult::Rows(rows) => {
                 assert_eq!(rows.len(), 1);
-                assert_eq!(rows[0].values.get("t.id"), Some(&Value::Int64(5)));
+                assert_eq!(rows[0].values.get("id"), Some(&Value::Int64(5)));
             }
             _ => panic!("expected rows"),
         }
@@ -255,7 +255,7 @@ mod tests {
             QueryResult::Rows(rows) => {
                 assert_eq!(rows.len(), 2);
                 for r in rows {
-                    assert_eq!(r.values.get("users.age"), Some(&Value::Int64(20)));
+                    assert_eq!(r.values.get("age"), Some(&Value::Int64(20)));
                 }
             }
             _ => panic!("expected rows"),
@@ -350,10 +350,10 @@ mod tests {
         match res {
             QueryResult::Rows(rows) => {
                 assert_eq!(
-                    rows[0].values.get("t.name"),
+                    rows[0].values.get("name"),
                     Some(&Value::String("Alice".into()))
                 );
-                assert!(rows[0].values.get("t.age").is_none());
+                assert!(rows[0].values.get("age").is_none());
             }
             _ => panic!("expected rows"),
         }
@@ -410,7 +410,7 @@ mod tests {
 
         match res {
             QueryResult::Rows(rows) => {
-                assert_eq!(rows[0].values.get("t.age"), Some(&Value::Int64(10)));
+                assert_eq!(rows[0].values.get("age"), Some(&Value::Int64(10)));
             }
             _ => panic!("expected rows"),
         }

@@ -283,11 +283,12 @@ where
                     });
                 }
 
-                loop {
-                    let col = parts
-                        .next()
-                        .ok_or(ParseError::UnexpectedEOF)?
-                        .trim_end_matches(',');
+                while let Some(&tok) = parts.peek() {
+                    if tok == "LIMIT" {
+                        break;
+                    }
+
+                    let col = parts.next().unwrap().trim_end_matches(',').to_string();
                     let mut asc = true;
 
                     if let Some(&"DESC") = parts.peek() {
@@ -298,12 +299,14 @@ where
                     }
 
                     order_by.push(OrderByExpr {
-                        expr: parse_column(col),
+                        expr: parse_column(&col),
                         asc,
                     });
 
-                    if matches!(parts.peek(), Some(&"LIMIT") | None) {
-                        break;
+                    if !matches!(parts.peek(), Some(&",")) {
+                        if matches!(parts.peek(), Some(&"LIMIT") | None) {
+                            break;
+                        }
                     }
                 }
             }

@@ -306,11 +306,6 @@ impl Database {
             }
 
             BoundStatement::Insert(ins) => {
-                let table = self
-                    .catalog
-                    .get_table(&ins.table)
-                    .ok_or_else(|| QueryError::Exec(anyhow::anyhow!("table not found")))?;
-
                 let mut rows = Vec::new();
 
                 for expr_row in ins.values {

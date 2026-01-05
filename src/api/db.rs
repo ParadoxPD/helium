@@ -15,6 +15,7 @@ use crate::frontend::sql::lower::lower_select;
 use crate::frontend::sql::parser::Parser;
 use crate::ir::expr::Expr;
 use crate::ir::pretty::pretty;
+use crate::optimizer::optimize;
 use crate::storage::btree::DiskBPlusTree;
 use crate::storage::btree::node::IndexKey;
 use crate::storage::page::RowId;
@@ -336,41 +337,29 @@ impl Database {
                                                 plan
                                             });
 
+                                            let optimized = db_phase!("Optimize Plan", {
+                                                db_debug!(
+                                                    Component::Optimizer,
+                                                    "Starting optimization"
+                                                );
+                                                let optimized = optimize(&plan, &self.catalog);
+                                                db_info!(
+                                                    Component::Optimizer,
+                                                    "Optimized plan:\n{}",
+                                                    pretty(&optimized)
+                                                );
+                                                optimized
+                                            });
+
                                             // Execute
                                             db_phase!("Execute Query", {
                                                 db_debug!(
                                                     Component::Executor,
                                                     "Creating execution tree"
                                                 );
-                                                let mut exec = execute_plan(plan, &self.catalog);
-
-                                                db_debug!(Component::Executor, "Opening operators");
-                                                //exec.open();
-
-                                                let mut rows: Vec<Row> = Vec::new();
-                                                let mut row_count = 0;
-
-                                                //db_debug!(Component::Executor, "Fetching rows");
-                                                //while let Some(row) = exec.next() {
-                                                //    row_count += 1;
-                                                //    db_trace!(
-                                                //        Component::Executor,
-                                                //        "Row {}: {:?}",
-                                                //        row_count,
-                                                //        row
-                                                //    );
-                                                //    rows.push(row);
-                                                //}
-
-                                                db_info!(
-                                                    Component::Executor,
-                                                    "Query returned {} row(s)",
-                                                    rows.len()
-                                                );
-                                                //exec.close();
-
-                                                //Ok(QueryResult::Rows(rows))
-                                                exec.map_err(QueryError::Exec)
+                                                execute_plan(optimized, &self.catalog)
+                                                    .map_err(QueryError::Exec)
+                                                    .and_then(Self::handle_result)
                                             })
                                         }
                                     )
@@ -729,5 +718,26 @@ impl Database {
 
     pub fn query(&mut self, sql: &str) -> Result<QueryResult, QueryError> {
         self.run_query(sql)
+    }
+
+    fn log_rows(component: Component, rows: &[Row]) {
+        db_debug!(component, "Fetching rows");
+
+        for (i, row) in rows.iter().enumerate() {
+            db_trace!(component, "Row {}: {:?}", i + 1, row);
+        }
+
+        db_info!(component, "Query returned {} row(s)", rows.len());
+    }
+
+    fn handle_result(res: QueryResult) -> Result<QueryResult, QueryError> {
+        match &res {
+            QueryResult::Rows(rows) => Self::log_rows(Component::Executor, rows),
+            QueryResult::Explain(plan) => {
+                db_info!(Component::Executor, "{:?}", plan)
+            }
+            QueryResult::Ok => {}
+        }
+        Ok(res)
     }
 }

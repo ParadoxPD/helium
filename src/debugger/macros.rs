@@ -36,7 +36,7 @@ macro_rules! db_warn {
 #[macro_export]
 macro_rules! db_info {
     ($component:expr, $($arg:tt)*) => {
-        $crate::db_log!($crate::debugger::debugger::DebugLevel::Info, $component, $($arg)*);
+        $crate::db_log!($crate::debugger::debugger::DebugLevel::Info, $component, $($arg)*)
     };
 }
 

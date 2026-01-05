@@ -54,6 +54,7 @@ impl Parser {
     fn current_position(&self) -> Position {
         self.positions[self.pos]
     }
+
     fn peek_ahead(&self, n: usize) -> &Token {
         self.tokens.get(self.pos + n).unwrap_or(&Token::EOF)
     }

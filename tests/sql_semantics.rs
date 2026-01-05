@@ -21,13 +21,12 @@ fn select_where_limit() {
 
     assert_eq!(rows.len(), 1);
     assert_eq!(
-        rows[0].values.get("users.name").unwrap(),
+        rows[0].values.get("name").unwrap(),
         &Value::String("Alice".into())
     );
 }
 
 #[test]
-#[ignore = "AND / OR / parentheses not fully done yet"]
 fn complex_predicates() {
     let mut db = TestDB::new();
 
@@ -58,6 +57,5 @@ fn complex_predicates() {
         )
         .unwrap();
 
-    // Alice (age>18 && active), Bob (name='Bob')
     assert_eq!(rows.len(), 2);
 }

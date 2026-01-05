@@ -49,7 +49,7 @@ impl std::error::Error for BindError {}
 
 #[derive(Debug)]
 pub struct BoundSelect {
-    pub columns: Vec<IRExpr>,
+    pub columns: Vec<(IRExpr, String)>,
     pub from: BoundFromItem,
     pub where_clause: Option<IRExpr>,
     pub order_by: Vec<(IRExpr, bool)>,
@@ -69,10 +69,10 @@ pub enum BoundFromItem {
     },
 }
 
-pub struct Binder {
+pub struct Binder<'a> {
     // alias -> table name
     pub tables: HashMap<String, String>,
-    pub catalog: Arc<Catalog>,
+    pub catalog: &'a Catalog,
 }
 
 #[derive(Debug)]
@@ -134,15 +134,20 @@ pub enum BoundStatement {
     },
 }
 
-impl Binder {
-    pub fn new(catalog: &Catalog) -> Self {
+impl<'a> Binder<'a> {
+    pub fn new(catalog: &'a Catalog) -> Self {
         Self {
-            catalog: Arc::new(catalog.clone()),
+            catalog,
             tables: HashMap::new(),
         }
     }
 
     pub fn bind_statement(&mut self, stmt: Statement) -> Result<BoundStatement, BindError> {
+        println!(
+            "Catalog table keys in bind statement {:?}",
+            self.catalog.tables.keys()
+        );
+        println!("table keys in bind statement {:?}", self.tables);
         match stmt {
             Statement::Select(s) => Ok(BoundStatement::Select(self.bind_select(s)?)),
             Statement::Insert(s) => Ok(BoundStatement::Insert(self.bind_insert(s)?)),
@@ -175,17 +180,19 @@ impl Binder {
 
         let mut bound_columns = Vec::new();
 
-        for expr in stmt.columns {
+        for item in stmt.columns {
+            let expr = item.expr;
+            let alias = item.alias; // <-- THIS was missing
+
             match expr {
                 // SELECT *
                 SqlExpr::Column { name, table } if name == "*" => {
                     match table {
-                        // qualified *
-                        Some(alias) => {
+                        Some(alias_tbl) => {
                             let table_name = self
                                 .tables
-                                .get(&alias)
-                                .ok_or_else(|| BindError::UnknownTable(alias.clone()))?
+                                .get(&alias_tbl)
+                                .ok_or_else(|| BindError::UnknownTable(alias_tbl.clone()))?
                                 .clone();
 
                             let table = self
@@ -194,36 +201,51 @@ impl Binder {
                                 .ok_or_else(|| BindError::UnknownTable(table_name.clone()))?;
 
                             for col in &table.schema.columns {
-                                bound_columns.push(IRExpr::BoundColumn {
-                                    table: alias.clone(),
-                                    name: col.name.clone(),
-                                });
+                                bound_columns.push((
+                                    IRExpr::BoundColumn {
+                                        table: alias_tbl.clone(),
+                                        name: col.name.clone(),
+                                    },
+                                    col.name.clone(), // output name
+                                ));
                             }
                         }
 
-                        // unqualified *
                         None => {
                             if self.tables.len() != 1 {
                                 return Err(BindError::AmbiguousColumn("*".into()));
                             }
 
-                            let (alias, table_name) = self.tables.iter().next().unwrap();
+                            let (alias_tbl, table_name) = self.tables.iter().next().unwrap();
                             let table = self
                                 .catalog
                                 .get_table(table_name)
                                 .ok_or_else(|| BindError::UnknownTable(table_name.clone()))?;
 
                             for col in &table.schema.columns {
-                                bound_columns.push(IRExpr::BoundColumn {
-                                    table: alias.clone(),
-                                    name: col.name.clone(),
-                                });
+                                bound_columns.push((
+                                    IRExpr::BoundColumn {
+                                        table: alias_tbl.clone(),
+                                        name: col.name.clone(),
+                                    },
+                                    col.name.clone(),
+                                ));
                             }
                         }
                     }
                 }
 
-                other => bound_columns.push(self.bind_expr(other)?),
+                // normal expression
+                other => {
+                    let bound = self.bind_expr(other)?;
+                    let name = match (&bound, alias) {
+                        (IRExpr::BoundColumn { name, .. }, None) => name.clone(),
+                        (_, Some(a)) => a,
+                        _ => "expr".to_string(),
+                    };
+
+                    bound_columns.push((bound, name));
+                }
             }
         }
 
@@ -283,7 +305,12 @@ impl Binder {
     pub fn bind_from(&self, from: FromItem) -> Result<BoundFromItem, BindError> {
         match from {
             FromItem::Table { name, alias } => {
-                let alias = alias.unwrap_or_else(|| name.clone());
+                println!("ALIAS = {:?}", alias);
+                let alias = match alias {
+                    Some(a) => a,
+                    None => name.clone(),
+                };
+
                 Ok(BoundFromItem::Table { name, alias })
             }
 
@@ -335,6 +362,7 @@ impl Binder {
     }
 
     pub fn bind_column(&self, table: Option<String>, name: String) -> Result<IRExpr, BindError> {
+        println!("TABLE {:?}", table);
         match table {
             Some(alias) => {
                 self.resolve_column(&alias, &name)?;
@@ -386,6 +414,11 @@ impl Binder {
         if columns.is_empty() {
             return Err(BindError::EmptyTable);
         }
+        println!(
+            "Catalog table keys in bind statement {:?}",
+            self.catalog.tables.keys()
+        );
+        println!("table keys in bind statement {:?}", self.tables);
 
         Ok(BoundCreateTable {
             table: stmt.table_name,
@@ -403,17 +436,23 @@ impl Binder {
         })
     }
 
-    pub fn bind_update(&self, stmt: UpdateStmt) -> Result<BoundUpdate, BindError> {
+    pub fn bind_update(&mut self, stmt: UpdateStmt) -> Result<BoundUpdate, BindError> {
         let table = self
             .catalog
             .get_table(&stmt.table)
             .ok_or_else(|| BindError::UnknownTable(stmt.table.clone()))?;
 
+        self.tables.clear();
+        self.tables.insert(stmt.table.clone(), stmt.table.clone());
+
         let mut assigns = Vec::new();
         for (col, expr) in stmt.assignments {
-            let column = table.schema.lookup(col).unwrap();
-            let bound_expr = self.bind_expr(expr)?;
+            let column = table
+                .schema
+                .lookup(col.clone())
+                .ok_or_else(|| BindError::UnknownColumn(col.to_string()))?;
 
+            let bound_expr = self.bind_expr(expr)?;
             assigns.push((column, bound_expr));
         }
 
@@ -427,6 +466,7 @@ impl Binder {
     }
 
     pub fn bind_insert(&self, stmt: InsertStmt) -> Result<BoundInsert, BindError> {
+        println!("INSERT TABLE KEYS = {:?}", self.catalog.tables.keys());
         let table = self
             .catalog
             .get_table(&stmt.table)
@@ -453,10 +493,13 @@ impl Binder {
         })
     }
 
-    pub fn bind_delete(&self, stmt: DeleteStmt) -> Result<BoundDelete, BindError> {
+    pub fn bind_delete(&mut self, stmt: DeleteStmt) -> Result<BoundDelete, BindError> {
         if !self.catalog.table_exists(&stmt.table) {
-            return Err(BindError::UnknownTable(stmt.table));
+            return Err(BindError::UnknownTable(stmt.table.clone()));
         }
+
+        self.tables.clear();
+        self.tables.insert(stmt.table.clone(), stmt.table.clone());
 
         let pred = stmt.where_clause.map(|e| self.bind_expr(e)).transpose()?;
 

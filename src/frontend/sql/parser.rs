@@ -1,5 +1,7 @@
 use crate::{
     common::value::Value,
+    db_debug,
+    debugger::debugger::DebugLevel,
     frontend::sql::lexer::{Token, Tokenizer},
 };
 
@@ -8,25 +10,52 @@ use super::ast::*;
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    positions: Vec<Position>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Position {
+    pub line: usize,
+    pub column: usize,
+}
+
+impl std::fmt::Display for Position {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.line, self.column)
+    }
 }
 
 impl Parser {
     pub fn new(input: &str) -> Self {
         let mut t = Tokenizer::new(input);
         let mut tokens = Vec::new();
+        let mut positions = Vec::new();
+
         loop {
-            let tok = t.next_token();
+            let (tok, pos) = t.next_token();
             tokens.push(tok.clone());
+            positions.push(pos);
             if tok == Token::EOF {
                 break;
             }
         }
 
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            positions,
+            pos: 0,
+        }
     }
 
     fn peek(&self) -> &Token {
         &self.tokens[self.pos]
+    }
+
+    fn current_position(&self) -> Position {
+        self.positions[self.pos]
+    }
+    fn peek_ahead(&self, n: usize) -> &Token {
+        self.tokens.get(self.pos + n).unwrap_or(&Token::EOF)
     }
 
     fn next(&mut self) -> &Token {
@@ -34,46 +63,75 @@ impl Parser {
         self.pos += 1;
         tok
     }
-
     fn expect(&mut self, expected: Token) -> Result<(), ParseError> {
+        let pos = self.current_position();
         let tok = self.next().clone();
         if tok == expected {
             Ok(())
         } else {
-            Err(ParseError::UnexpectedToken(tok))
+            Err(ParseError::UnexpectedToken {
+                token: tok,
+                position: pos,
+            })
         }
     }
-
     fn expect_ident(&mut self) -> Result<String, ParseError> {
+        let pos = self.current_position();
         match self.next() {
             Token::Ident(s) => Ok(s.clone()),
-            t => Err(ParseError::UnexpectedToken(t.clone())),
+            t => Err(ParseError::UnexpectedToken {
+                token: t.clone(),
+                position: pos,
+            }),
         }
     }
+    pub fn parse_statements(&mut self) -> Result<Vec<Statement>, ParseError> {
+        let mut stmts = Vec::new();
 
-    fn match_keyword(&mut self, kw: &str) -> bool {
-        matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case(kw))
-    }
+        loop {
+            let pos = self.current_position();
+            // Skip any leading semicolons
+            while matches!(self.peek(), Token::Semicolon) {
+                self.next();
+            }
 
-    fn consume_keyword(&mut self, kw: &str) -> Result<(), ParseError> {
-        if self.match_keyword(kw) {
-            self.next();
-            Ok(())
-        } else {
-            Err(ParseError::Message(format!("expected keyword {}", kw)))
+            // Check for EOF
+            if self.is_eof() {
+                break;
+            }
+
+            // Parse statement
+            stmts.push(self.parse_statement()?);
+
+            // Expect semicolon between statements (except before EOF)
+            if !self.is_eof() && !matches!(self.peek(), Token::Semicolon) {
+                // Allow EOF without semicolon for last statement
+                if !self.is_eof() {
+                    return Err(ParseError::Expected {
+                        expected: "semicolon or EOF".into(),
+                        found: Some(format!("{:?}", self.peek())),
+                        position: pos,
+                    });
+                }
+            }
         }
+
+        Ok(stmts)
     }
 
     pub fn parse_statement(&mut self) -> Result<Statement, ParseError> {
+        db_debug!(DebugLevel::Trace, "[PARSE] next token = {:?}", self.peek());
+        let pos = self.current_position();
+
         match self.peek() {
-            Token::Ident(s) if s.eq_ignore_ascii_case("SELECT") => {
+            Token::Select => {
                 self.next();
                 Ok(Statement::Select(self.parse_select()?))
             }
 
-            Token::Ident(s) if s.eq_ignore_ascii_case("EXPLAIN") => {
+            Token::Explain => {
                 self.next();
-                let analyze = if self.match_keyword("ANALYZE") {
+                let analyze = if matches!(self.peek(), Token::Analyze) {
                     self.next();
                     true
                 } else {
@@ -83,80 +141,99 @@ impl Parser {
                 Ok(Statement::Explain { analyze, stmt })
             }
 
-            Token::Ident(s) if s.eq_ignore_ascii_case("CREATE") => {
+            Token::Create => {
                 self.next();
-                if self.match_keyword("TABLE") {
-                    self.next();
-                    Ok(Statement::CreateTable(self.parse_create_table()?))
-                } else if self.match_keyword("INDEX") {
-                    self.next();
-                    Ok(self.parse_create_index()?)
-                } else {
-                    Err(ParseError::Message("expected TABLE or INDEX".into()))
+                match self.peek() {
+                    Token::Table => {
+                        self.next();
+                        Ok(Statement::CreateTable(self.parse_create_table()?))
+                    }
+                    Token::Index => {
+                        self.next();
+                        Ok(self.parse_create_index()?)
+                    }
+                    _ => Err(ParseError::Message {
+                        message: "expected TABLE or INDEX".into(),
+                        position: pos,
+                    }),
                 }
             }
 
-            Token::Ident(s) if s.eq_ignore_ascii_case("DROP") => {
+            Token::Drop => {
                 self.next();
-                if self.match_keyword("TABLE") {
-                    self.next();
-                    Ok(Statement::DropTable(self.parse_drop_table()?))
-                } else if self.match_keyword("INDEX") {
-                    self.next();
-                    Ok(self.parse_drop_index()?)
-                } else {
-                    Err(ParseError::Message("expected TABLE or INDEX".into()))
+                match self.peek() {
+                    Token::Table => {
+                        self.next();
+                        Ok(Statement::DropTable(self.parse_drop_table()?))
+                    }
+                    Token::Index => {
+                        self.next();
+                        Ok(self.parse_drop_index()?)
+                    }
+                    _ => Err(ParseError::Message {
+                        message: "expected TABLE or INDEX".into(),
+                        position: pos,
+                    }),
                 }
             }
 
-            Token::Ident(s) if s.eq_ignore_ascii_case("INSERT") => {
+            Token::Insert => {
                 self.next();
                 Ok(Statement::Insert(self.parse_insert()?))
             }
 
-            Token::Ident(s) if s.eq_ignore_ascii_case("UPDATE") => {
+            Token::Update => {
                 self.next();
                 Ok(Statement::Update(self.parse_update()?))
             }
 
-            Token::Ident(s) if s.eq_ignore_ascii_case("DELETE") => {
+            Token::Delete => {
                 self.next();
                 Ok(Statement::Delete(self.parse_delete()?))
             }
 
-            t => Err(ParseError::UnexpectedToken(t.clone())),
+            t => Err(ParseError::UnexpectedToken {
+                token: t.clone(),
+                position: pos,
+            }),
         }
     }
+
     fn parse_select(&mut self) -> Result<SelectStmt, ParseError> {
         let columns = self.parse_select_list()?;
-        self.consume_keyword("FROM")?;
+        self.expect(Token::From)?;
         let from = self.parse_from()?;
+        let pos = self.current_position();
 
-        let where_clause = if self.match_keyword("WHERE") {
+        let where_clause = if matches!(self.peek(), Token::Where) {
             self.next();
             Some(self.parse_expr()?)
         } else {
             None
         };
 
-        let order_by = if self.match_keyword("ORDER") {
+        let order_by = if matches!(self.peek(), Token::Order) {
             self.next();
-            self.consume_keyword("BY")?;
+            self.expect(Token::By)?;
             self.parse_order_by()?
         } else {
             Vec::new()
         };
 
-        let limit = if self.match_keyword("LIMIT") {
+        let limit = if matches!(self.peek(), Token::Limit) {
             self.next();
             match self.next() {
                 Token::Int(n) => Some(*n as usize),
-                t => return Err(ParseError::UnexpectedToken(t.clone())),
+                t => {
+                    return Err(ParseError::UnexpectedToken {
+                        token: t.clone(),
+                        position: pos,
+                    });
+                }
             }
         } else {
             None
         };
-
         Ok(SelectStmt {
             columns,
             from,
@@ -170,10 +247,10 @@ impl Parser {
 
         loop {
             let expr = self.parse_expr()?;
-            let asc = if self.match_keyword("DESC") {
+            let asc = if matches!(self.peek(), Token::Desc) {
                 self.next();
                 false
-            } else if self.match_keyword("ASC") {
+            } else if matches!(self.peek(), Token::Asc) {
                 self.next();
                 true
             } else {
@@ -198,7 +275,7 @@ impl Parser {
     fn parse_or(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_and()?;
 
-        while self.match_keyword("OR") {
+        while matches!(self.peek(), Token::Or) {
             self.next();
             let right = self.parse_and()?;
             left = Expr::Binary {
@@ -214,7 +291,7 @@ impl Parser {
     fn parse_and(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_comparison()?;
 
-        while self.match_keyword("AND") {
+        while matches!(self.peek(), Token::And) {
             self.next();
             let right = self.parse_comparison()?;
             left = Expr::Binary {
@@ -267,28 +344,20 @@ impl Parser {
 
         Ok(left)
     }
+
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
-        // Take ownership of the token FIRST
-        let tok = self.next().clone();
+        let pos = self.current_position();
 
-        match tok {
+        match self.next() {
+            Token::True => Ok(Expr::Literal(Value::Bool(true))),
+            Token::False => Ok(Expr::Literal(Value::Bool(false))),
+            Token::Null => Ok(Expr::Literal(Value::Null)),
+
             Token::Ident(first) => {
-                if first.eq_ignore_ascii_case("NULL") {
-                    return Ok(Expr::Literal(Value::Null));
-                }
-
-                if first.eq_ignore_ascii_case("TRUE") {
-                    return Ok(Expr::Literal(Value::Bool(true)));
-                }
-                if first.eq_ignore_ascii_case("FALSE") {
-                    return Ok(Expr::Literal(Value::Bool(false)));
-                }
-
-                // Now it's safe to inspect / mutate self again
+                let first = first.clone();
                 if matches!(self.peek(), Token::Dot) {
-                    self.next(); // consume '.'
+                    self.next();
                     let second = self.expect_ident()?;
-
                     Ok(Expr::Column {
                         table: Some(first),
                         name: second,
@@ -301,9 +370,8 @@ impl Parser {
                 }
             }
 
-            Token::Int(n) => Ok(Expr::Literal(Value::Int64(n))),
-
-            Token::String(s) => Ok(Expr::Literal(Value::String(s))),
+            Token::Int(n) => Ok(Expr::Literal(Value::Int64(*n))),
+            Token::String(s) => Ok(Expr::Literal(Value::String(s.clone()))),
 
             Token::LParen => {
                 let e = self.parse_expr()?;
@@ -311,13 +379,16 @@ impl Parser {
                 Ok(e)
             }
 
-            t => Err(ParseError::UnexpectedToken(t)),
+            t => Err(ParseError::UnexpectedToken {
+                token: t.clone(),
+                position: pos,
+            }),
         }
     }
 
     fn parse_create_index(&mut self) -> Result<Statement, ParseError> {
         let name = self.expect_ident()?;
-        self.consume_keyword("ON")?;
+        self.expect(Token::On)?;
         let table = self.expect_ident()?;
         self.expect(Token::LParen)?;
         let column = self.expect_ident()?;
@@ -334,21 +405,40 @@ impl Parser {
         Ok(Statement::DropIndex { name })
     }
 
-    fn parse_select_list(&mut self) -> Result<Vec<Expr>, ParseError> {
-        let mut cols = Vec::new();
+    fn parse_select_list(&mut self) -> Result<Vec<SelectItem>, ParseError> {
+        let mut cols = Vec::with_capacity(4);
 
         loop {
             match self.peek() {
                 Token::Star => {
                     self.next();
-                    cols.push(Expr::Column {
-                        table: None,
-                        name: "*".into(),
+                    cols.push(SelectItem {
+                        expr: Expr::Column {
+                            table: None,
+                            name: "*".into(),
+                        },
+                        alias: None,
                     });
                 }
                 _ => {
                     let expr = self.parse_expr()?;
-                    cols.push(expr);
+
+                    // Optional alias
+                    let alias = if self.peek().is_keyword("AS") {
+                        self.next(); // consume AS
+                        Some(self.expect_ident()?)
+                    } else {
+                        None
+                    };
+
+                    db_debug!(
+                        DebugLevel::Debug,
+                        "[PARSE] select item: expr={:?}, alias={:?}",
+                        expr,
+                        alias
+                    );
+
+                    cols.push(SelectItem { expr, alias });
                 }
             }
 
@@ -358,7 +448,6 @@ impl Parser {
                 break;
             }
         }
-
         Ok(cols)
     }
     fn parse_from(&mut self) -> Result<FromItem, ParseError> {
@@ -367,12 +456,12 @@ impl Parser {
 
         // 2. Parse zero or more JOIN clauses
         loop {
-            if self.match_keyword("JOIN") {
+            if matches!(self.peek(), Token::Join) {
                 self.next(); // consume JOIN
 
                 let right = self.parse_table_ref()?;
 
-                self.consume_keyword("ON")?;
+                self.expect(Token::On)?;
                 let on = self.parse_expr()?;
 
                 left = FromItem::Join {
@@ -396,21 +485,27 @@ impl Parser {
 
         loop {
             let name = self.expect_ident()?;
+            let pos = self.current_position();
             let ty = self.expect_ident()?; // INT, TEXT, BOOL
 
             let sql_ty = match ty.to_uppercase().as_str() {
                 "INT" => SqlType::Int,
                 "TEXT" => SqlType::Text,
                 "BOOL" => SqlType::Bool,
-                _ => return Err(ParseError::Message("unknown type".into())),
+                _ => {
+                    return Err(ParseError::Message {
+                        message: format!("unknown type '{}'", ty),
+                        position: pos,
+                    });
+                }
             };
 
             let mut nullable = true;
-            if self.match_keyword("NOT") {
+            if matches!(self.peek(), Token::Not) {
                 self.next();
-                self.consume_keyword("NULL")?;
+                self.expect(Token::Null)?;
                 nullable = false;
-            } else if self.match_keyword("NULL") {
+            } else if matches!(self.peek(), Token::Null) {
                 self.next();
                 nullable = true;
             }
@@ -442,9 +537,9 @@ impl Parser {
     }
 
     fn parse_insert(&mut self) -> Result<InsertStmt, ParseError> {
-        self.consume_keyword("INTO")?;
+        self.expect(Token::Into)?;
         let table = self.expect_ident()?;
-        self.consume_keyword("VALUES")?;
+        self.expect(Token::Values)?;
 
         let mut rows = Vec::new();
 
@@ -477,7 +572,7 @@ impl Parser {
 
     fn parse_update(&mut self) -> Result<UpdateStmt, ParseError> {
         let table = self.expect_ident()?;
-        self.consume_keyword("SET")?;
+        self.expect(Token::Set)?;
 
         let mut assignments = Vec::new();
 
@@ -487,7 +582,6 @@ impl Parser {
             let expr = self.parse_expr()?;
 
             assignments.push((col, expr));
-
             if matches!(self.peek(), Token::Comma) {
                 self.next();
             } else {
@@ -495,7 +589,7 @@ impl Parser {
             }
         }
 
-        let where_clause = if self.match_keyword("WHERE") {
+        let where_clause = if matches!(self.peek(), Token::Where) {
             self.next();
             Some(self.parse_expr()?)
         } else {
@@ -510,10 +604,10 @@ impl Parser {
     }
 
     fn parse_delete(&mut self) -> Result<DeleteStmt, ParseError> {
-        self.consume_keyword("FROM")?;
+        self.expect(Token::From)?;
         let table = self.expect_ident()?;
 
-        let where_clause = if self.match_keyword("WHERE") {
+        let where_clause = if matches!(self.peek(), Token::Where) {
             self.next();
             Some(self.parse_expr()?)
         } else {
@@ -529,17 +623,24 @@ impl Parser {
     fn parse_table_ref(&mut self) -> Result<FromItem, ParseError> {
         let name = self.expect_ident()?;
 
-        let alias = if matches!(self.peek(), Token::Ident(_)) {
-            Some(self.expect_ident()?)
+        let alias = if let Token::Ident(_) = self.peek() {
+            // Also check it's not a keyword
+            if matches!(
+                self.peek(),
+                Token::Where | Token::Order | Token::Limit | Token::Join
+            ) {
+                None
+            } else {
+                Some(self.expect_ident()?)
+            }
         } else {
             None
         };
-
         Ok(FromItem::Table { name, alias })
     }
 
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
-        if self.match_keyword("NOT") {
+        if matches!(self.peek(), Token::Not) {
             self.next();
             let expr = self.parse_comparison()?;
             return Ok(Expr::Unary {
@@ -568,5 +669,17 @@ impl Parser {
             op,
             right: Box::new(right),
         })
+    }
+}
+
+impl Parser {
+    #[inline]
+    pub fn is_eof(&self) -> bool {
+        matches!(self.peek(), Token::EOF)
+    }
+}
+impl Token {
+    pub fn is_keyword(&self, kw: &str) -> bool {
+        matches!(self, Token::Ident(s) if s.eq_ignore_ascii_case(kw))
     }
 }

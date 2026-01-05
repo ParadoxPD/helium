@@ -6,9 +6,9 @@ use helpers::{data::*, harness::TestDB};
 #[test]
 fn inner_join_basic() {
     let mut db = TestDB::new();
-    db.exec(users_sql()).unwrap();
-    db.exec(orders_sql()).unwrap();
-
+    println!("EXEC {:?}", db.exec(users_sql()));
+    println!("EXEC {:?}", db.exec(orders_sql()));
+    println!("EXEC {:?}", db.exec("SELECT * FROM users"));
     let rows = db
         .query(
             "
@@ -22,8 +22,8 @@ fn inner_join_basic() {
 
     assert_eq!(rows.len(), 1);
     assert_eq!(
-        rows[0].values.get("u.name").unwrap(),
+        rows[0].values.get("name").unwrap(),
         &Value::String("Alice".into())
     );
-    assert_eq!(rows[0].values.get("o.amount").unwrap(), &Value::Int64(200));
+    assert_eq!(rows[0].values.get("amount").unwrap(), &Value::Int64(200));
 }

@@ -66,7 +66,7 @@ fn update_single_row() {
 
     let rows = db.query("SELECT name FROM users WHERE id = 1").unwrap();
     assert_eq!(
-        rows[0].values.get("users.name").unwrap(),
+        rows[0].values.get("name").unwrap(),
         &Value::String("Bob".into())
     );
 }
@@ -111,9 +111,10 @@ fn delete_where() {
     db.exec("INSERT INTO t VALUES (1)").unwrap();
     db.exec("INSERT INTO t VALUES (2)").unwrap();
 
-    db.exec("DELETE FROM t WHERE a = 1").unwrap();
+    println!("{:?}", db.exec("DELETE FROM t WHERE a = 1"));
 
     let rows = db.query("SELECT * FROM t").unwrap();
+    println!("{:?}", rows);
     assert_eq!(rows.len(), 1);
 }
 

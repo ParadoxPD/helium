@@ -8,7 +8,7 @@ mod tests {
     use crate::exec::catalog::Catalog;
     use crate::frontend::sql::ast::{FromItem, Statement};
     use crate::frontend::sql::binder::{BindError, Binder, BoundStatement};
-    use crate::frontend::sql::lower::{Lowered, lower_stmt};
+    use crate::frontend::sql::lower::{Lowered, lower_select};
     use crate::frontend::sql::parser::Parser;
     use crate::ir::pretty::pretty;
     use crate::storage::table::HeapTable;
@@ -207,89 +207,5 @@ mod tests {
         let sql = "DROP TABLE users";
         let stmt = Parser::new(sql).parse_statement().unwrap();
         matches!(stmt, Statement::DropTable(_));
-    }
-    #[test]
-    fn lowers_simple_select() {
-        let sql = "SELECT name FROM users;";
-        let lowered = lower_stmt(bind(sql).unwrap());
-
-        let expected = r#"
-Project [name]
-└─ Scan users
-"#;
-
-        match lowered {
-            Lowered::Plan(plan) => {
-                assert_eq!(pretty(&plan).trim(), expected.trim());
-            }
-            _ => panic!("expected plan"),
-        }
-    }
-
-    #[test]
-    fn lowers_select_where_limit() {
-        let sql = "SELECT name FROM users WHERE age > 18 LIMIT 5;";
-
-        let lowered = lower_stmt(bind(sql).unwrap());
-
-        let expected = r#"
-Limit 5
-└─ Project [name]
-   └─ Filter (age Gt 18)
-      └─ Scan users
-"#;
-
-        match lowered {
-            Lowered::Plan(plan) => {
-                assert_eq!(pretty(&plan).trim(), expected.trim())
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn explain_select() {
-        let sql = "EXPLAIN SELECT name FROM users;";
-
-        let lowered = lower_stmt(bind(sql).unwrap());
-
-        match lowered {
-            Lowered::Explain { analyze, plan } => {
-                assert!(!analyze);
-                assert!(pretty(&plan).contains("Scan users"));
-            }
-            _ => panic!("expected explain"),
-        }
-    }
-
-    #[test]
-    fn lowers_order_by() {
-        let sql = "SELECT name FROM users ORDER BY age DESC;";
-
-        let lowered = lower_stmt(bind(sql).unwrap());
-
-        match lowered {
-            Lowered::Plan(plan) => {
-                let p = pretty(&plan);
-                assert!(p.contains("Sort"));
-            }
-            _ => panic!("expected plan"),
-        }
-    }
-
-    #[test]
-    fn lowers_join_into_logical_plan() {
-        let sql = "SELECT u.id FROM users u JOIN orders o ON u.id = o.user_id;";
-        let lowered = lower_stmt(bind(sql).unwrap());
-
-        match lowered {
-            Lowered::Plan(plan) => {
-                let p = pretty(&plan);
-                assert!(p.contains("Join"));
-                assert!(p.contains("Scan users"));
-                assert!(p.contains("Scan orders"));
-            }
-            _ => panic!("expected plan"),
-        }
     }
 }

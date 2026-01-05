@@ -58,29 +58,29 @@
 
 ### SQL DDL
 
-- [ ] `CREATE TABLE`
-- [ ] `DROP TABLE`
+- [x] `CREATE TABLE`
+- [x] `DROP TABLE`
 - [x] `CREATE INDEX`
 - [x] `DROP INDEX`
 
 ### SQL DML
 
-- [ ] `INSERT`
-- [ ] `DELETE`
-- [ ] `UPDATE`
+- [x] `INSERT`
+- [x] `DELETE`
+- [x] `UPDATE`
 
 ### SQL Queries
 
-- [ ] `SELECT *`
+- [x] `SELECT *`
 - [ ] `SELECT column list`
-- [ ] `WHERE =, <, >, <=, >=`
-- [ ] `AND`, `OR`
-- [ ] `IS NULL`
+- [x] `WHERE =, <, >, <=, >=`
+- [x] `AND`, `OR`
+- [x] `IS NULL`
 
 ### Execution
 
 - [x] Predicate recheck in IndexScan
-- [ ] Correct NULL semantics
+- [x] Correct NULL semantics
 - [ ] Type checking at execution time
 
 **Outcome:**

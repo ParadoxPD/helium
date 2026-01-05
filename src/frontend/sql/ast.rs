@@ -1,6 +1,9 @@
 use std::fmt;
 
-use crate::{common::value::Value, frontend::sql::lexer::Token};
+use crate::{
+    common::value::Value,
+    frontend::sql::{lexer::Token, parser::Position},
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
@@ -27,11 +30,17 @@ pub enum Statement {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectStmt {
-    pub columns: Vec<Expr>,
+    pub columns: Vec<SelectItem>,
     pub from: FromItem,
     pub where_clause: Option<Expr>,
     pub order_by: Vec<OrderByExpr>,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectItem {
+    pub expr: Expr,
+    pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,28 +148,61 @@ pub enum FromItem {
 
 #[derive(Debug, Clone)]
 pub enum ParseError {
-    UnexpectedEOF,
-    UnexpectedToken(Token),
+    UnexpectedEOF {
+        position: Position,
+    },
+    UnexpectedToken {
+        token: Token,
+        position: Position,
+    },
     Expected {
         expected: String,
         found: Option<String>,
+        position: Position,
     },
-    Unsupported(String),
-    InvalidLiteral(String),
-    Message(String),
+    Unsupported {
+        message: String,
+        position: Position,
+    },
+    InvalidLiteral {
+        literal: String,
+        position: Position,
+    },
+    Message {
+        message: String,
+        position: Position,
+    },
 }
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ParseError::UnexpectedEOF => write!(f, "Unexpected end of file"),
-            ParseError::UnexpectedToken(tok) => write!(f, "Unexpected token : {:?}", tok),
-            ParseError::Expected { expected, found } => {
-                write!(f, "Expected : {:?}, Found : {:?}", expected, found)
+            ParseError::UnexpectedEOF { position } => {
+                write!(f, "Unexpected end of file at {}", position)
             }
-            ParseError::Unsupported(tok) => write!(f, "Unsupported operation : {}", tok),
-            ParseError::InvalidLiteral(tok) => write!(f, "Invalid Literal : {}", tok),
-            ParseError::Message(message) => write!(f, "{}", message),
+            ParseError::UnexpectedToken { token, position } => {
+                write!(f, "Unexpected token {:?} at {}", token, position)
+            }
+            ParseError::Expected {
+                expected,
+                found,
+                position,
+            } => {
+                write!(
+                    f,
+                    "Expected {} but found {:?} at {}",
+                    expected, found, position
+                )
+            }
+            ParseError::Unsupported { message, position } => {
+                write!(f, "Unsupported: {} at {}", message, position)
+            }
+            ParseError::InvalidLiteral { literal, position } => {
+                write!(f, "Invalid literal '{}' at {}", literal, position)
+            }
+            ParseError::Message { message, position } => {
+                write!(f, "{} at {}", message, position)
+            }
         }
     }
 }

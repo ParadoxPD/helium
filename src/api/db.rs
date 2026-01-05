@@ -5,17 +5,13 @@ use crate::buffer::buffer_pool::{BufferPool, BufferPoolHandle};
 use crate::common::schema::Schema;
 use crate::common::value::Value;
 use crate::exec::catalog::Catalog;
-use crate::exec::expr_eval::{eval_predicate, eval_value};
 use crate::exec::operator::Row;
 use crate::exec::{execute_delete, execute_plan, execute_update};
 use crate::frontend::sql::ast::ParseError;
 use crate::frontend::sql::binder::{BindError, Binder, BoundStatement};
-use crate::frontend::sql::lower::{Lowered, lower_select};
+use crate::frontend::sql::lower::lower_select;
 use crate::frontend::sql::parser::Parser;
-use crate::frontend::sql::{lower as sql_lower, parser, pretty_ast::pretty_ast};
 use crate::ir::expr::Expr;
-use crate::ir::pretty::pretty;
-use crate::optimizer::optimize;
 use crate::storage::btree::DiskBPlusTree;
 use crate::storage::btree::node::IndexKey;
 use crate::storage::page::RowId;
@@ -133,6 +129,8 @@ impl Database {
     }
 
     pub fn create_table(&mut self, table_name: &str, schema: Schema) -> Result<(), QueryError> {
+        println!("Creating table {}", table_name);
+
         self.catalog
             .create_table(table_name.into(), schema, self.buffer_pool.clone())
             .map_err(|e| QueryError::Exec(anyhow::anyhow!("failed to create table: {}", e)))
@@ -254,28 +252,33 @@ impl Database {
 
     pub fn run_query(&mut self, sql: &str) -> Result<QueryResult, QueryError> {
         // 1. Parse
-        let stmt = Parser::new(sql).parse_statement()?;
+        let stmts = Parser::new(sql).parse_statements()?;
 
-        // 2. Bind
-        let mut binder = Binder::new(&self.catalog);
-        let bound = binder.bind_statement(stmt)?;
+        let mut last_result = None;
 
-        // 3. Execute
-        match bound {
-            BoundStatement::Select(s) => {
-                let plan = lower_select(s);
-                execute_plan(plan, &self.catalog).map_err(QueryError::Exec)
-            }
-            BoundStatement::Explain { analyze, stmt } => {
-                match *stmt {
+        for stmt in stmts {
+            // 2. Bind
+            let bound = {
+                let mut binder = Binder::new(&self.catalog);
+                binder.bind_statement(stmt)?
+            };
+
+            println!("BOUND =  {:?}", bound);
+
+            // 3. Execute
+            last_result = Some(match bound {
+                BoundStatement::Select(s) => {
+                    let plan = lower_select(s);
+                    execute_plan(plan, &self.catalog).map_err(QueryError::Exec)
+                }
+                BoundStatement::Explain { analyze, stmt } => match *stmt {
                     BoundStatement::Select(s) => {
                         let plan = lower_select(s);
 
-                        // Phase 1: just stringify logical plan
                         let output = if analyze {
-                            format!("EXPLAIN ANALYZE\n{:#?}", plan)
+                            format!("EXPLAIN ANALYZE\n{}", plan.explain())
                         } else {
-                            format!("EXPLAIN\n{:#?}", plan)
+                            format!("EXPLAIN\n{}", plan.explain())
                         };
 
                         Ok(QueryResult::Explain(output))
@@ -284,67 +287,68 @@ impl Database {
                     _ => Err(QueryError::Exec(anyhow::anyhow!(
                         "EXPLAIN only supported for SELECT"
                     ))),
+                },
+
+                BoundStatement::CreateTable(ct) => {
+                    self.create_table(&ct.table, ct.schema)?;
+                    Ok(QueryResult::Ok)
                 }
-            }
 
-            BoundStatement::CreateTable(ct) => {
-                self.create_table(&ct.table, ct.schema)?;
-                Ok(QueryResult::Ok)
-            }
+                BoundStatement::DropTable(dt) => {
+                    self.catalog
+                        .drop_table(&dt.table)
+                        .map_err(|e| QueryError::Exec(anyhow::anyhow!(e)))?;
+                    Ok(QueryResult::Ok)
+                }
 
-            BoundStatement::DropTable(dt) => {
-                self.catalog
-                    .drop_table(&dt.table)
-                    .map_err(|e| QueryError::Exec(anyhow::anyhow!(e)))?;
-                Ok(QueryResult::Ok)
-            }
+                BoundStatement::CreateIndex(ci) => {
+                    self.create_index(&ci.name, &ci.table, &ci.column)?;
+                    Ok(QueryResult::Ok)
+                }
 
-            BoundStatement::CreateIndex(ci) => {
-                self.create_index(&ci.name, &ci.table, &ci.column)?;
-                Ok(QueryResult::Ok)
-            }
+                BoundStatement::DropIndex(di) => {
+                    self.catalog.drop_index(&di.name);
+                    Ok(QueryResult::Ok)
+                }
 
-            BoundStatement::DropIndex(di) => {
-                self.catalog.drop_index(&di.name);
-                Ok(QueryResult::Ok)
-            }
+                BoundStatement::Insert(ins) => {
+                    let mut rows = Vec::new();
 
-            BoundStatement::Insert(ins) => {
-                let mut rows = Vec::new();
+                    // Process each row
+                    for expr_row in ins.rows {
+                        let mut row = Vec::new();
 
-                // Process each row
-                for expr_row in ins.rows {
-                    let mut row = Vec::new();
-
-                    // Process each value in the row
-                    for expr in expr_row {
-                        match expr {
-                            Expr::Literal(v) => row.push(v),
-                            _ => {
-                                return Err(QueryError::Exec(anyhow::anyhow!(
-                                    "non-literal in INSERT"
-                                )));
+                        // Process each value in the row
+                        for expr in expr_row {
+                            match expr {
+                                Expr::Literal(v) => row.push(v),
+                                _ => {
+                                    return Err(QueryError::Exec(anyhow::anyhow!(
+                                        "non-literal in INSERT"
+                                    )));
+                                }
                             }
                         }
+
+                        rows.push(row);
                     }
 
-                    rows.push(row);
+                    self.insert_values(&ins.table, rows)?;
+                    Ok(QueryResult::Ok)
                 }
 
-                self.insert_values(&ins.table, rows)?;
-                Ok(QueryResult::Ok)
-            }
+                BoundStatement::Delete(del) => {
+                    execute_delete(del, &self.catalog)?;
+                    Ok(QueryResult::Ok)
+                }
 
-            BoundStatement::Delete(del) => {
-                execute_delete(del, &self.catalog)?;
-                Ok(QueryResult::Ok)
-            }
-
-            BoundStatement::Update(upd) => {
-                execute_update(upd, &self.catalog)?;
-                Ok(QueryResult::Ok)
-            }
+                BoundStatement::Update(upd) => {
+                    execute_update(upd, &self.catalog)?;
+                    Ok(QueryResult::Ok)
+                }
+            });
         }
+        Ok(last_result.unwrap_or(Ok(QueryResult::Ok))?)
     }
 
     pub fn query(&mut self, sql: &str) -> Result<QueryResult, QueryError> {

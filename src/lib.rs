@@ -4,6 +4,7 @@ pub mod error;
 pub mod api;
 pub mod buffer;
 pub mod common;
+pub mod debugger;
 pub mod exec;
 pub mod frontend;
 pub mod ir;

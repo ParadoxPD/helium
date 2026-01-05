@@ -19,7 +19,7 @@ fn explain_structure() {
         ",
         )
         .unwrap();
-
+    println!("{:?}", plan);
     assert!(plan.contains("Limit 5"));
     assert!(plan.contains("Filter"));
     assert!(plan.contains("Scan users"));

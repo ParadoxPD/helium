@@ -9,7 +9,7 @@ pub fn pretty_bound(b: &BoundSelect) -> String {
 
     out.push_str("  Columns\n");
     for c in &b.columns {
-        pretty_ir(c, 2, &mut out);
+        pretty_ir(&c.0, 2, &mut out);
     }
 
     out.push_str("  From\n");

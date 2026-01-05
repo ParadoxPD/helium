@@ -1,5 +1,6 @@
-use crate::common::value::Value;
-use crate::exec::expr_eval::eval_value;
+use std::cmp::Ordering;
+
+use crate::exec::evaluator::Evaluator;
 use crate::exec::operator::{Operator, Row};
 use crate::ir::expr::Expr;
 
@@ -49,20 +50,30 @@ impl Operator for SortExec {
     }
 }
 
-fn compare_rows(a: &Row, b: &Row, keys: &[(Expr, bool)]) -> std::cmp::Ordering {
+fn compare_rows(a: &Row, b: &Row, keys: &[(Expr, bool)]) -> Ordering {
+    let eva = Evaluator::new(a);
+    let evb = Evaluator::new(b);
+
     for (expr, asc) in keys {
-        let va = eval_value(expr, a);
-        let vb = eval_value(expr, b);
+        let va = eva.eval_expr(expr);
+        let vb = evb.eval_expr(expr);
 
         let ord = match (va, vb) {
-            (Value::Int64(x), Value::Int64(y)) => x.cmp(&y),
-            (Value::String(x), Value::String(y)) => x.cmp(&y),
-            _ => std::cmp::Ordering::Equal,
+            // NULL = NULL → equal
+            (None, None) => Ordering::Equal,
+
+            // NULLS LAST (default SQL behavior)
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+
+            // Both non-NULL → compare values
+            (Some(x), Some(y)) => x.cmp(&y).expect("Error"),
         };
 
-        if ord != std::cmp::Ordering::Equal {
+        if ord != Ordering::Equal {
             return if *asc { ord } else { ord.reverse() };
         }
     }
-    std::cmp::Ordering::Equal
+
+    Ordering::Equal
 }

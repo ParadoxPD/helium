@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use crate::{
     common::{schema::Column, value::Value},
     exec::{
-        expr_eval::eval_value,
+        evaluator::{self, Evaluator},
         operator::{Operator, Row},
     },
     ir::expr::Expr,
@@ -23,13 +23,14 @@ impl Operator for UpdateExec {
 
     fn next(&mut self) -> Option<Row> {
         let row = self.input.next()?; // execution Row (qualified keys)
+        let ev = Evaluator::new(&row);
 
         // 1. Start from existing fully-qualified values
         let mut updated = row.values.clone();
 
         // 2. Apply assignments USING fully-qualified keys
         for (col, expr) in &self.assignments {
-            let v = eval_value(expr, &row);
+            let v = ev.eval_expr(expr)?;
 
             let fq = format!("{}.{}", self.table.name, col.name);
             updated.insert(fq, v);

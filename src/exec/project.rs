@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use crate::exec::expr_eval::eval_value;
+use crate::common::value::Value;
+use crate::db_debug;
+use crate::debugger::debugger::DebugLevel;
+use crate::exec::evaluator::Evaluator;
 use crate::exec::operator::{Operator, Row};
 use crate::ir::expr::Expr;
 
@@ -22,10 +25,13 @@ impl Operator for ProjectExec {
 
     fn next(&mut self) -> Option<Row> {
         let row = self.input.next()?;
+        let ev = Evaluator::new(&row);
+
         let mut out = HashMap::new();
 
         for (expr, alias) in &self.exprs {
-            let value = eval_value(expr, &row);
+            let value = ev.eval_expr(expr).unwrap_or(Value::Null);
+            db_debug!(DebugLevel::Trace, "[PROJECT] {} = {:?}", alias, value);
             out.insert(alias.clone(), value);
         }
 

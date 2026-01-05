@@ -1,4 +1,4 @@
-use crate::exec::expr_eval::eval_predicate;
+use crate::exec::evaluator::Evaluator;
 use crate::exec::operator::{Operator, Row};
 use crate::ir::expr::Expr;
 
@@ -15,26 +15,30 @@ impl FilterExec {
 
 impl Operator for FilterExec {
     fn open(&mut self) {
+        println!("FilterExec.open()");
         self.input.open();
     }
 
     fn next(&mut self) -> Option<Row> {
+        println!("FilterExec.next()");
         while let Some(row) = self.input.next() {
-            let val = eval_predicate(&self.predicate, &row);
-            println!("[FilterExec] row = {:?}, predicate = {:?}", row, val);
+            let ev = Evaluator::new(&row);
+            let passed = ev.eval_predicate(&self.predicate);
 
-            if matches!(val, true) {
+            println!("[FilterExec] row = {:?}, predicate = {}", row, passed);
+
+            if passed {
                 println!("[FilterExec] PASSED");
-
                 return Some(row);
             } else {
                 println!("[FilterExec] REJECTED");
+                continue;
             }
         }
 
-        println!("[FilterExec] EOF");
         None
     }
+
     fn close(&mut self) {
         self.input.close();
     }

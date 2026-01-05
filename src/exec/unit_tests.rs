@@ -370,6 +370,7 @@ mod tests {
 
         match res {
             QueryResult::Rows(rows) => {
+                println!("{:?}", rows);
                 assert_eq!(rows[0].values.get("next_age"), Some(&Value::Int64(21)));
             }
             _ => panic!("expected rows"),

@@ -14,6 +14,7 @@ pub struct ScanExec<'a> {
 
 impl<'a> ScanExec<'a> {
     pub fn new(table: Arc<HeapTable>, alias: String, _: Vec<String>) -> Self {
+        println!("SCANNING {}", alias);
         Self {
             table,
             cursor: None,
@@ -24,10 +25,12 @@ impl<'a> ScanExec<'a> {
 
 impl<'a> Operator for ScanExec<'a> {
     fn open(&mut self) {
+        println!("ScanExec.open {}", self.alias);
         self.cursor = Some(self.table.clone().scan());
     }
 
     fn next(&mut self) -> Option<Row> {
+        println!("ScanExec.next {}", self.alias);
         let (rid, storage_row) = self.cursor.as_mut()?.next()?;
         let schema = self.table.schema();
 

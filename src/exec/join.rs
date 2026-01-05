@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use crate::buffer::buffer_pool::BufferPool;
-use crate::exec::expr_eval::eval_predicate;
+use crate::exec::evaluator::Evaluator;
 use crate::exec::operator::{Operator, Row};
 use crate::ir::expr::Expr;
 use crate::storage::page_manager::FilePageManager;
@@ -16,8 +16,6 @@ pub struct JoinExec {
 
     i: usize,
     j: usize,
-
-    opened: bool,
 }
 
 impl JoinExec {
@@ -30,7 +28,6 @@ impl JoinExec {
             right_rows: Vec::new(),
             i: 0,
             j: 0,
-            opened: false,
         }
     }
 
@@ -45,15 +42,14 @@ impl JoinExec {
 
 impl Operator for JoinExec {
     fn open(&mut self) {
-        if self.opened {
-            return;
-        }
-        self.opened = true;
+        // Always reset state
+        self.left_rows.clear();
+        self.right_rows.clear();
+        self.i = 0;
+        self.j = 0;
 
         self.left.open();
         self.right.open();
-
-        // Materialize both sides (simple, correct)
         while let Some(row) = self.left.next() {
             self.left_rows.push(row);
         }
@@ -61,9 +57,8 @@ impl Operator for JoinExec {
         while let Some(row) = self.right.next() {
             self.right_rows.push(row);
         }
-
-        self.i = 0;
-        self.j = 0;
+        println!("LEFT = {:?}", self.left_rows.len());
+        println!("RIGHT = {:?}", self.right_rows.len());
     }
 
     fn next(&mut self) -> Option<Row> {
@@ -74,7 +69,10 @@ impl Operator for JoinExec {
                 self.j += 1;
 
                 let merged = Self::merge_rows(l, r);
-                if eval_predicate(&self.on, &merged) {
+                let ev = Evaluator::new(&merged);
+                println!("JOIN ROW KEYS = {:?}", merged.values.keys());
+
+                if ev.eval_predicate(&self.on) {
                     println!("JOIN ROW = {:?}", merged);
 
                     return Some(merged);
@@ -93,6 +91,5 @@ impl Operator for JoinExec {
         self.right.close();
         self.left_rows.clear();
         self.right_rows.clear();
-        self.opened = false;
     }
 }

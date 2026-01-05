@@ -18,12 +18,12 @@ impl LimitExec {
 
 impl Operator for LimitExec {
     fn open(&mut self) {
-        self.seen = 0;
         self.input.open();
+        self.seen = 0;
     }
 
     fn next(&mut self) -> Option<Row> {
-        if self.seen >= self.limit {
+        if self.limit == 0 || self.seen >= self.limit {
             return None;
         }
 

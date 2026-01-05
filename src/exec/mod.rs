@@ -1,6 +1,6 @@
 pub mod catalog;
 pub mod delete;
-pub mod expr_eval;
+pub mod evaluator;
 pub mod filter;
 pub mod index_scan;
 pub mod join;
@@ -19,7 +19,7 @@ use crate::api::db::QueryResult;
 use crate::common::schema::Schema;
 use crate::common::value::Value;
 use crate::exec::catalog::Catalog;
-use crate::exec::expr_eval::{eval_predicate, eval_value};
+use crate::exec::evaluator::Evaluator;
 use crate::exec::filter::FilterExec;
 use crate::exec::index_scan::IndexScanExec;
 use crate::exec::join::JoinExec;
@@ -108,18 +108,26 @@ pub fn execute_delete(del: BoundDelete, catalog: &Catalog) -> Result<(), anyhow:
 
     let mut cursor = table.heap.scan();
 
+    let mut to_delete = Vec::new();
+
     while let Some((rid, storage_row)) = cursor.next() {
         let row = Row {
             row_id: rid,
-            values: materialize_row(&storage_row.values, &table.schema)?,
+            values: materialize_row(&del.table, &storage_row.values, &table.schema)?,
         };
 
+        let ev = Evaluator::new(&row);
+
         if let Some(pred) = &del.predicate {
-            if !eval_predicate(pred, &row) {
+            if !ev.eval_predicate(pred) {
                 continue;
             }
         }
 
+        to_delete.push(rid);
+    }
+
+    for rid in to_delete {
         table.heap.delete(rid);
     }
 
@@ -133,29 +141,41 @@ pub fn execute_update(upd: BoundUpdate, catalog: &Catalog) -> Result<(), anyhow:
 
     let mut cursor = table.heap.scan();
 
+    let mut to_update = Vec::new();
+
     while let Some((rid, storage_row)) = cursor.next() {
         let row = Row {
             row_id: rid,
-            values: materialize_row(&storage_row.values, &table.schema)?,
+            values: materialize_row(&upd.table, &storage_row.values, &table.schema)?,
         };
 
+        let ev = Evaluator::new(&row);
+
         if let Some(pred) = &upd.predicate {
-            if !eval_predicate(pred, &row) {
+            if !ev.eval_predicate(pred) {
                 continue;
             }
         }
 
         let mut updated = row.values.clone();
         for (col, expr) in &upd.assignments {
-            let v = eval_value(expr, &row);
-            updated.insert(col.name.clone(), v);
+            let v = ev.eval_expr(expr).unwrap_or(Value::Null);
+            let key = format!("{}.{}", upd.table, col.name);
+            updated.insert(key, v);
         }
 
+        to_update.push((rid, updated));
+    }
+
+    for (rid, updated) in to_update {
         let physical = table
             .schema
             .columns
             .iter()
-            .map(|c| updated.get(&c.name).cloned().unwrap_or(Value::Null))
+            .map(|c| {
+                let key = format!("{}.{}", upd.table, c.name);
+                updated.get(&key).cloned().unwrap_or(Value::Null)
+            })
             .collect::<Vec<_>>();
 
         table.heap.delete(rid);
@@ -165,7 +185,11 @@ pub fn execute_update(upd: BoundUpdate, catalog: &Catalog) -> Result<(), anyhow:
     Ok(())
 }
 
-pub fn materialize_row(values: &[Value], schema: &Schema) -> Result<HashMap<String, Value>> {
+pub fn materialize_row(
+    table: &str,
+    values: &[Value],
+    schema: &Schema,
+) -> Result<HashMap<String, Value>> {
     if values.len() != schema.columns.len() {
         bail!(
             "row/schema length mismatch: {} values, {} columns",
@@ -177,7 +201,7 @@ pub fn materialize_row(values: &[Value], schema: &Schema) -> Result<HashMap<Stri
     let mut map = HashMap::with_capacity(values.len());
 
     for (col, val) in schema.columns.iter().zip(values.iter()) {
-        map.insert(col.name.clone(), val.clone());
+        map.insert(format!("{}.{}", table, col.name), val.clone());
     }
 
     Ok(map)

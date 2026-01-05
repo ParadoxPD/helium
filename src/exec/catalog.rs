@@ -93,6 +93,7 @@ impl Catalog {
         schema: Schema,
         buffer_pool: BufferPoolHandle,
     ) -> Result<()> {
+        println!("Creating table in catalog : {}", table_name);
         if self.tables.contains_key(&table_name) {
             bail!("table already exists");
         }
@@ -112,6 +113,7 @@ impl Catalog {
                 heap,
             },
         );
+        println!("{:?}", self.tables.keys());
 
         Ok(())
     }

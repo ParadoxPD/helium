@@ -4,7 +4,6 @@ use helium::common::value::Value;
 use helpers::{data::*, harness::TestDB};
 
 #[test]
-#[ignore = "GROUP BY + aggregates not implemented yet"]
 fn full_pipeline_query() {
     let mut db = TestDB::new();
     db.exec(users_sql()).unwrap();
@@ -24,7 +23,7 @@ fn full_pipeline_query() {
         .unwrap();
 
     assert_eq!(
-        rows[0].values.get("u.name").unwrap(),
+        rows[0].values.get("name").unwrap(),
         &Value::String("Alice".into())
     );
 }

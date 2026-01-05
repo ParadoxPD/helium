@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{
+    db_info, db_trace,
+    debugger::Component,
     exec::operator::{Operator, Row},
     storage::table::{HeapTable, TableCursor},
 };
@@ -25,13 +27,24 @@ impl<'a> ScanExec<'a> {
 
 impl<'a> Operator for ScanExec<'a> {
     fn open(&mut self) {
-        println!("ScanExec.open {}", self.alias);
+        db_info!(
+            Component::Executor,
+            "Opening scan on table '{}'",
+            self.alias
+        );
         self.cursor = Some(self.table.clone().scan());
     }
 
     fn next(&mut self) -> Option<Row> {
-        println!("ScanExec.next {}", self.alias);
+        db_trace!(Component::Executor, "ScanExec::next() on '{}'", self.alias);
         let (rid, storage_row) = self.cursor.as_mut()?.next()?;
+        db_trace!(
+            Component::Executor,
+            "Found row: rid={:?}, values={:?}",
+            rid,
+            storage_row.values
+        );
+
         let schema = self.table.schema();
 
         let mut out = HashMap::with_capacity(schema.columns.len());

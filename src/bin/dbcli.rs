@@ -1,10 +1,21 @@
 use std::io::{self, Write};
 
 use helium::api::db::{Database, QueryResult};
-use helium::common::value::Value;
-use helium::exec::operator::Row;
+use helium::debugger::{DebugLevel, set_debug_level};
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    let debug_level = args
+        .iter()
+        .find(|arg| arg.starts_with("--debug="))
+        .and_then(|arg| arg.strip_prefix("--debug="))
+        .and_then(|level| level.parse::<u8>().ok())
+        .map(DebugLevel::from_u8)
+        .unwrap_or(DebugLevel::Off);
+
+    set_debug_level(debug_level);
+
     let mut db = Database::new("/tmp/test.db".to_string());
 
     println!("Helium DB CLI");

@@ -1,4 +1,8 @@
-use crate::{db_debug, debugger::debugger::DebugLevel, frontend::sql::parser::Position};
+use crate::{
+    db_debug, db_trace,
+    debugger::{Component, debugger::DebugLevel},
+    frontend::sql::parser::Position,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
@@ -91,7 +95,10 @@ impl<'a> Tokenizer<'a> {
                 self.advance_position(c);
                 c
             }
-            None => return (Token::EOF, start_pos),
+            None => {
+                db_trace!(Component::Lexer, "EOF at {}", start_pos);
+                return (Token::EOF, start_pos);
+            }
         };
 
         let tok = match c {
@@ -222,12 +229,7 @@ impl<'a> Tokenizer<'a> {
             _ => self.next_token().0,
         };
 
-        db_debug!(
-            DebugLevel::Trace,
-            "[LEX] token = {:?} at {:?}",
-            tok,
-            start_pos
-        );
+        db_trace!(Component::Lexer, "Token: {:?} at {}", tok, start_pos);
         (tok, start_pos)
     }
 

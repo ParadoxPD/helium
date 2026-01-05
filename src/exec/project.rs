@@ -31,7 +31,6 @@ impl Operator for ProjectExec {
 
         for (expr, alias) in &self.exprs {
             let value = ev.eval_expr(expr).unwrap_or(Value::Null);
-            db_debug!(DebugLevel::Trace, "[PROJECT] {} = {:?}", alias, value);
             out.insert(alias.clone(), value);
         }
 

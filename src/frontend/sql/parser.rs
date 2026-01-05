@@ -1,7 +1,7 @@
 use crate::{
     common::value::Value,
-    db_debug,
-    debugger::debugger::DebugLevel,
+    db_debug, db_info, db_scope, db_trace,
+    debugger::{Component, debugger::DebugLevel},
     frontend::sql::lexer::{Token, Tokenizer},
 };
 
@@ -120,83 +120,98 @@ impl Parser {
     }
 
     pub fn parse_statement(&mut self) -> Result<Statement, ParseError> {
-        db_debug!(DebugLevel::Trace, "[PARSE] next token = {:?}", self.peek());
-        let pos = self.current_position();
+        db_scope!(DebugLevel::Debug, Component::Parser, "parse_statement", {
+            db_trace!(Component::Parser, "Current token: {:?}", self.peek());
+            let pos = self.current_position();
 
-        match self.peek() {
-            Token::Select => {
-                self.next();
-                Ok(Statement::Select(self.parse_select()?))
-            }
-
-            Token::Explain => {
-                self.next();
-                let analyze = if matches!(self.peek(), Token::Analyze) {
+            let result = match self.peek() {
+                Token::Select => {
                     self.next();
-                    true
-                } else {
-                    false
-                };
-                let stmt = Box::new(self.parse_statement()?);
-                Ok(Statement::Explain { analyze, stmt })
-            }
-
-            Token::Create => {
-                self.next();
-                match self.peek() {
-                    Token::Table => {
-                        self.next();
-                        Ok(Statement::CreateTable(self.parse_create_table()?))
-                    }
-                    Token::Index => {
-                        self.next();
-                        Ok(self.parse_create_index()?)
-                    }
-                    _ => Err(ParseError::Message {
-                        message: "expected TABLE or INDEX".into(),
-                        position: pos,
-                    }),
+                    db_info!(Component::Parser, "Parsing SELECT statement");
+                    Statement::Select(self.parse_select()?)
                 }
-            }
 
-            Token::Drop => {
-                self.next();
-                match self.peek() {
-                    Token::Table => {
+                Token::Explain => {
+                    self.next();
+                    let analyze = if matches!(self.peek(), Token::Analyze) {
                         self.next();
-                        Ok(Statement::DropTable(self.parse_drop_table()?))
-                    }
-                    Token::Index => {
-                        self.next();
-                        Ok(self.parse_drop_index()?)
-                    }
-                    _ => Err(ParseError::Message {
-                        message: "expected TABLE or INDEX".into(),
-                        position: pos,
-                    }),
+                        true
+                    } else {
+                        false
+                    };
+                    let stmt = Box::new(self.parse_statement()?);
+                    db_info!(Component::Parser, "Parsing EXPLAIN statement");
+                    Statement::Explain { analyze, stmt }
                 }
-            }
 
-            Token::Insert => {
-                self.next();
-                Ok(Statement::Insert(self.parse_insert()?))
-            }
+                Token::Create => {
+                    self.next();
+                    match self.peek() {
+                        Token::Table => {
+                            self.next();
+                            db_info!(Component::Parser, "Parsing CREATE TABLE statement");
+                            Statement::CreateTable(self.parse_create_table()?)
+                        }
+                        Token::Index => {
+                            self.next();
+                            db_info!(Component::Parser, "Parsing CREATE INDEX statement");
+                            self.parse_create_index()?
+                        }
+                        _ => Err(ParseError::Message {
+                            message: "expected TABLE or INDEX".into(),
+                            position: pos,
+                        })?,
+                    }
+                }
 
-            Token::Update => {
-                self.next();
-                Ok(Statement::Update(self.parse_update()?))
-            }
+                Token::Drop => {
+                    self.next();
+                    match self.peek() {
+                        Token::Table => {
+                            self.next();
+                            db_info!(Component::Parser, "Parsing DROP TABLE statement");
+                            Statement::DropTable(self.parse_drop_table()?)
+                        }
+                        Token::Index => {
+                            self.next();
+                            db_info!(Component::Parser, "Parsing CREATE INDEX statement");
+                            self.parse_drop_index()?
+                        }
+                        _ => Err(ParseError::Message {
+                            message: "expected TABLE or INDEX".into(),
+                            position: pos,
+                        })?,
+                    }
+                }
 
-            Token::Delete => {
-                self.next();
-                Ok(Statement::Delete(self.parse_delete()?))
-            }
+                Token::Insert => {
+                    self.next();
 
-            t => Err(ParseError::UnexpectedToken {
-                token: t.clone(),
-                position: pos,
-            }),
-        }
+                    db_info!(Component::Parser, "Parsing INSERT statement");
+                    Statement::Insert(self.parse_insert()?)
+                }
+
+                Token::Update => {
+                    self.next();
+                    db_info!(Component::Parser, "Parsing UPDATE statement");
+                    Statement::Update(self.parse_update()?)
+                }
+
+                Token::Delete => {
+                    self.next();
+                    db_info!(Component::Parser, "Parsing UPDATE statement");
+                    Statement::Delete(self.parse_delete()?)
+                }
+
+                t => Err(ParseError::UnexpectedToken {
+                    token: t.clone(),
+                    position: pos,
+                })?,
+            };
+
+            db_debug!(Component::Parser, "Parsed: {:?}", result);
+            Ok(result)
+        })
     }
 
     fn parse_select(&mut self) -> Result<SelectStmt, ParseError> {
@@ -430,13 +445,6 @@ impl Parser {
                     } else {
                         None
                     };
-
-                    db_debug!(
-                        DebugLevel::Debug,
-                        "[PARSE] select item: expr={:?}, alias={:?}",
-                        expr,
-                        alias
-                    );
 
                     cols.push(SelectItem { expr, alias });
                 }

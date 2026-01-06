@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 
 use crate::common::value::Value;
-use crate::db_debug;
-use crate::debugger::debugger::DebugLevel;
 use crate::exec::evaluator::Evaluator;
 use crate::exec::operator::{Operator, Row};
 use crate::ir::expr::Expr;

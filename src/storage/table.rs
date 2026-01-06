@@ -1,17 +1,12 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, bail};
 
 use crate::{
     buffer::buffer_pool::BufferPoolHandle,
     common::{schema::Schema, value::Value},
-    exec::operator::Row,
     storage::{
         btree::node::Index,
-        page::{HeapPageHandle, Page, PageId, RowId, RowPage, StorageRow},
+        page::{Page, PageId, RowId, RowPage, StorageRow},
     },
 };
 

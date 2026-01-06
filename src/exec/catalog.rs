@@ -6,9 +6,9 @@ use std::{
 use anyhow::{Result, anyhow, bail};
 
 use crate::{
-    buffer::buffer_pool::{BufferPool, BufferPoolHandle},
+    buffer::buffer_pool::BufferPoolHandle,
     common::{schema::Schema, value::Value},
-    storage::{btree::node::Index, page::RowId, page_manager::FilePageManager, table::HeapTable},
+    storage::{btree::node::Index, page::RowId, table::HeapTable},
 };
 
 const DEFAULT_PAGE_CAPACITY: usize = 256;

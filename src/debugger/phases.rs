@@ -1,6 +1,5 @@
 // src/debugger/phases.rs
 
-use std::collections::HashMap;
 use std::time::Instant;
 
 pub struct PhaseTracker {

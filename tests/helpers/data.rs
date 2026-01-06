@@ -1,3 +1,5 @@
+
+#[allow(dead_code)]
 pub fn users_sql() -> &'static str {
     "
     CREATE TABLE users (
@@ -12,6 +14,7 @@ pub fn users_sql() -> &'static str {
     "
 }
 
+#[allow(dead_code)]
 pub fn orders_sql() -> &'static str {
     "
     CREATE TABLE orders (

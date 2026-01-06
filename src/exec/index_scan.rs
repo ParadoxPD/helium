@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     common::{
-        schema::{Column, Schema},
+        schema::Schema,
         value::Value,
     },
     exec::operator::{Operator, Row},

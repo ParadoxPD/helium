@@ -2,8 +2,6 @@
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::*;
-
     use crate::buffer::buffer_pool::{BufferPool, BufferPoolHandle};
     use crate::common::types::DataType;
     use crate::common::value::Value;
@@ -22,11 +20,6 @@ mod tests {
     use crate::storage::page::RowId;
     use crate::storage::page_manager::FilePageManager;
 
-    /* ============================================================
-     * Helpers (schema-only catalog, NO storage)
-     * ============================================================
-     */
-
     struct DummyIndex;
 
     impl Index for DummyIndex {
@@ -38,11 +31,11 @@ mod tests {
             panic!("DummyIndex::delete called — optimizer-only index was executed");
         }
 
-        fn get(&self, key: &IndexKey) -> Vec<RowId> {
+        fn get(&self, _key: &IndexKey) -> Vec<RowId> {
             todo!()
         }
 
-        fn range(&self, from: &IndexKey, to: &IndexKey) -> Vec<RowId> {
+        fn range(&self, _from: &IndexKey, _to: &IndexKey) -> Vec<RowId> {
             todo!()
         }
     }
@@ -93,11 +86,6 @@ mod tests {
 
         catalog
     }
-
-    /* ============================================================
-     * Constant folding
-     * ============================================================
-     */
 
     #[test]
     fn folds_simple_arithmetic() {
@@ -187,11 +175,6 @@ Filter (true)
         assert_eq!(pretty(&once), pretty(&twice));
     }
 
-    /* ============================================================
-     * Index selection (FIXED SECTION)
-     * ============================================================
-     */
-
     #[test]
     fn filter_on_indexed_column_becomes_indexscan() {
         let catalog = test_catalog_with_index(true);
@@ -236,11 +219,6 @@ Filter (true)
 
         assert!(matches!(optimized, LogicalPlan::Filter(_)));
     }
-
-    /* ============================================================
-     * Predicate pushdown
-     * ============================================================
-     */
 
     #[test]
     fn pushes_filter_below_project() {
@@ -297,11 +275,6 @@ Filter (age Gt 18)
 
         assert_eq!(pretty(&once), pretty(&twice));
     }
-
-    /* ============================================================
-     * Projection prune
-     * ============================================================
-     */
 
     #[test]
     fn prunes_unused_project_fields() {

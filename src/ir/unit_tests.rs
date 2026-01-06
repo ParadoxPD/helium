@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
 
-    use crate::common::schema::Column;
+    
     use crate::common::value::Value;
     use crate::ir::expr::{BinaryOp, Expr, UnaryOp};
     use crate::ir::plan::LogicalPlan;

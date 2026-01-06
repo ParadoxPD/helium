@@ -1,8 +1,4 @@
-use crate::{
-    db_debug, db_trace,
-    debugger::{Component, debugger::DebugLevel},
-    frontend::sql::parser::Position,
-};
+use crate::{db_trace, debugger::Component, frontend::sql::parser::Position};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
@@ -66,6 +62,7 @@ pub enum Token {
 }
 
 pub struct Tokenizer<'a> {
+    #[allow(dead_code)]
     input: &'a str,
     chars: std::iter::Peekable<std::str::Chars<'a>>,
     line: usize,
@@ -143,7 +140,7 @@ impl<'a> Tokenizer<'a> {
             // ---------- string literal ----------
             '\'' => {
                 let mut s = String::new();
-                while let Some(&ch) = self.chars.peek() {
+                while let Some(&_ch) = self.chars.peek() {
                     let ch = self.chars.next().unwrap();
                     self.advance_position(ch);
                     if ch == '\'' {
@@ -264,7 +261,7 @@ impl<'a> Tokenizer<'a> {
                         self.chars.next();
                         self.advance_position('-');
 
-                        while let Some(&ch) = self.chars.peek() {
+                        while let Some(&_ch) = self.chars.peek() {
                             let ch = self.chars.next().unwrap();
                             self.advance_position(ch);
                             if ch == '\n' {

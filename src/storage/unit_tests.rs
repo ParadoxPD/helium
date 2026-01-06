@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn heap_table_grows_pages() {
-        let mut t = test_heap(2);
+        let t = test_heap(2);
 
         t.insert(vec![Value::Int64(1)]);
         t.insert(vec![Value::Int64(2)]);
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn heap_cursor_scans_all_rows() {
-        let mut t = test_heap(2);
+        let t = test_heap(2);
 
         t.insert(vec![Value::Int64(1)]);
         t.insert(vec![Value::Int64(2)]);
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn insert_returns_stable_row_ids() {
-        let mut table = test_heap(2);
+        let table = test_heap(2);
 
         let r1 = table.insert(vec![Value::Int64(1)]);
         let r2 = table.insert(vec![Value::Int64(2)]);
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn insert_allocates_new_page_when_full() {
-        let mut table = test_heap(1);
+        let table = test_heap(1);
 
         let r1 = table.insert(vec![Value::Int64(1)]);
         let r2 = table.insert(vec![Value::Int64(2)]);
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn delete_hides_row_but_preserves_slot() {
-        let mut table = test_heap(2);
+        let table = test_heap(2);
 
         let r1 = table.insert(vec![Value::Int64(1)]);
         let _r2 = table.insert(vec![Value::Int64(2)]);
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn delete_and_insert_preserves_slot_reuse() {
-        let mut table = test_heap(1);
+        let table = test_heap(1);
 
         let r1 = table.insert(vec![Value::Int64(1)]);
         table.delete(r1);
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn heap_table_disk_roundtrip() {
-        let mut table = test_heap(4);
+        let table = test_heap(4);
 
         let r1 = table.insert(vec![Value::Int64(1)]);
         let r2 = table.insert(vec![Value::Int64(2)]);

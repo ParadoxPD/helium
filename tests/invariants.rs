@@ -1,4 +1,3 @@
-use helium::ir::expr::Expr;
 
 #[test]
 #[should_panic(expected = "reached execution")]

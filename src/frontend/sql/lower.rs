@@ -1,10 +1,6 @@
-use crate::exec::catalog::Catalog;
-use crate::frontend::sql::binder::{Binder, BoundFromItem, BoundSelect, BoundStatement};
-use crate::frontend::sql::pretty_binder::pretty_bound;
+use crate::frontend::sql::binder::{BoundFromItem, BoundSelect};
 use crate::ir::expr::Expr as IRExpr;
 use crate::ir::plan::{Join, LogicalPlan, Sort};
-
-use super::ast::*;
 
 pub enum Lowered {
     Plan(LogicalPlan),
@@ -58,12 +54,5 @@ fn lower_from(from: BoundFromItem) -> LogicalPlan {
             right: Box::new(lower_from(*right)),
             on,
         }),
-    }
-}
-
-fn output_name(expr: &IRExpr) -> String {
-    match expr {
-        IRExpr::BoundColumn { name, .. } => name.clone(),
-        _ => "expr".to_string(),
     }
 }

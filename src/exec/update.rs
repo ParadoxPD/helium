@@ -3,11 +3,11 @@ use std::{collections::HashMap, sync::Arc};
 use crate::{
     common::{schema::Column, value::Value},
     exec::{
-        evaluator::{self, Evaluator},
+        evaluator::{Evaluator},
         operator::{Operator, Row},
     },
     ir::expr::Expr,
-    storage::{page::StorageRow, table::HeapTable},
+    storage::table::HeapTable,
 };
 
 pub struct UpdateExec {

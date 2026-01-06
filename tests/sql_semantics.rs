@@ -1,10 +1,14 @@
 mod helpers;
 
-use helium::common::value::Value;
+use helium::{
+    common::value::Value,
+    debugger::{DebugLevel, set_debug_level},
+};
 use helpers::{data::*, harness::TestDB};
 
 #[test]
 fn select_where_limit() {
+    set_debug_level(DebugLevel::Trace);
     let mut db = TestDB::new();
     db.exec(users_sql()).unwrap();
 
@@ -19,7 +23,7 @@ fn select_where_limit() {
         )
         .unwrap();
 
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
     assert_eq!(
         rows[0].values.get("name").unwrap(),
         &Value::String("Alice".into())

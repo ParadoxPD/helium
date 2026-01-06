@@ -55,7 +55,7 @@ impl Parser {
         self.positions[self.pos]
     }
 
-    fn peek_ahead(&self, n: usize) -> &Token {
+    fn _peek_ahead(&self, n: usize) -> &Token {
         self.tokens.get(self.pos + n).unwrap_or(&Token::EOF)
     }
 
@@ -658,7 +658,7 @@ impl Parser {
             });
         }
 
-        let mut left = self.parse_arithmetic()?;
+        let left = self.parse_arithmetic()?;
 
         let op = match self.peek() {
             Token::Eq => BinaryOp::Eq,

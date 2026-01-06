@@ -28,7 +28,7 @@ use crate::exec::operator::{Operator, Row};
 use crate::exec::project::ProjectExec;
 use crate::exec::scan::ScanExec;
 use crate::exec::sort::SortExec;
-use crate::frontend::sql::binder::{BoundDelete, BoundInsert, BoundUpdate};
+use crate::frontend::sql::binder::{BoundDelete, BoundUpdate};
 use crate::ir::plan::LogicalPlan;
 
 pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
@@ -101,7 +101,7 @@ pub fn execute_plan(plan: LogicalPlan, catalog: &Catalog) -> Result<QueryResult,
     Ok(QueryResult::Rows(rows))
 }
 
-pub fn execute_delete(del: BoundDelete, catalog: &Catalog) -> Result<(), anyhow::Error> {
+pub fn execute_delete(del: BoundDelete, catalog: &Catalog) -> Result<usize, anyhow::Error> {
     let table = catalog
         .get_table(&del.table)
         .ok_or_else(|| anyhow::anyhow!("table '{}' not found", del.table))?;
@@ -126,15 +126,16 @@ pub fn execute_delete(del: BoundDelete, catalog: &Catalog) -> Result<(), anyhow:
 
         to_delete.push(rid);
     }
+    let rows = to_delete.len();
 
     for rid in to_delete {
         table.heap.delete(rid);
     }
 
-    Ok(())
+    Ok(rows)
 }
 
-pub fn execute_update(upd: BoundUpdate, catalog: &Catalog) -> Result<(), anyhow::Error> {
+pub fn execute_update(upd: BoundUpdate, catalog: &Catalog) -> Result<usize, anyhow::Error> {
     let table = catalog
         .get_table(&upd.table)
         .ok_or_else(|| anyhow::anyhow!("table '{}' not found", upd.table))?;
@@ -167,6 +168,8 @@ pub fn execute_update(upd: BoundUpdate, catalog: &Catalog) -> Result<(), anyhow:
         to_update.push((rid, updated));
     }
 
+    let rows = to_update.len();
+
     for (rid, updated) in to_update {
         let physical = table
             .schema
@@ -182,7 +185,7 @@ pub fn execute_update(upd: BoundUpdate, catalog: &Catalog) -> Result<(), anyhow:
         table.heap.insert(physical);
     }
 
-    Ok(())
+    Ok(rows)
 }
 
 pub fn materialize_row(

@@ -4,8 +4,7 @@ use std::sync::{Arc, Mutex};
 use crate::buffer::buffer_pool::{BufferPool, BufferPoolHandle};
 use crate::common::schema::Schema;
 use crate::common::value::Value;
-use crate::debugger::debugger::reset_indent;
-use crate::debugger::{Component, DebugLevel, get_debug_level, get_report, reset};
+use crate::debugger::Component;
 use crate::exec::catalog::Catalog;
 use crate::exec::operator::Row;
 use crate::exec::{execute_delete, execute_plan, execute_update};
@@ -26,7 +25,7 @@ use anyhow::Result;
 
 #[derive(Debug)]
 pub enum QueryResult {
-    Ok,
+    Ok(String),
     Rows(Vec<Row>),
     Explain(String),
 }
@@ -41,8 +40,8 @@ pub enum QueryError {
 impl std::fmt::Display for QueryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            QueryError::Parse(e) => write!(f, "Parse error: {:?}", e),
-            QueryError::Bind(e) => write!(f, "Bind error: {:?}", e),
+            QueryError::Parse(e) => write!(f, "Parse error: {}", e),
+            QueryError::Bind(e) => write!(f, "Bind error: {}", e),
             QueryError::Exec(e) => write!(f, "Execution error: {}", e),
         }
     }
@@ -141,11 +140,17 @@ impl Database {
             .map_err(|e| QueryError::Exec(anyhow::anyhow!("failed to create table: {}", e)))
     }
 
-    pub fn insert_values(&mut self, table: &str, rows: Vec<Vec<Value>>) -> Result<(), QueryError> {
+    pub fn insert_values(
+        &mut self,
+        table: &str,
+        rows: Vec<Vec<Value>>,
+    ) -> Result<usize, QueryError> {
         let table_ref = self
             .catalog
             .get_table(table)
             .ok_or_else(|| QueryError::Exec(anyhow::anyhow!("table '{}' not found", table)))?;
+
+        let rows_no = rows.len();
 
         for values in rows {
             let rid = table_ref.heap.insert(values.clone());
@@ -168,7 +173,7 @@ impl Database {
             }
         }
 
-        Ok(())
+        Ok(rows_no)
     }
 
     pub fn delete_row(&mut self, table: &str, rid: RowId) -> Result<(), QueryError> {
@@ -399,7 +404,7 @@ impl Database {
                                                         //  lower_select(&optimized, &self.catalog);
                                                         //exec.open();
 
-                                                        let mut row_count = 0;
+                                                        let row_count = 0;
                                                         //while let Some(_) = exec.next() {
                                                         //   row_count += 1;
                                                         //}
@@ -471,7 +476,7 @@ impl Database {
                                                 "Table '{}' created successfully",
                                                 ct.table
                                             );
-                                            Ok(QueryResult::Ok)
+                                            Ok(QueryResult::Ok("Table Created successfully".into()))
                                         }
                                     )
                                 }
@@ -502,7 +507,7 @@ impl Database {
                                                 "Table '{}' dropped successfully",
                                                 dt.table
                                             );
-                                            Ok(QueryResult::Ok)
+                                            Ok(QueryResult::Ok("Table Dropped successfully".into()))
                                         }
                                     )
                                 }
@@ -528,7 +533,7 @@ impl Database {
                                                 "Index '{}' created successfully",
                                                 ci.name
                                             );
-                                            Ok(QueryResult::Ok)
+                                            Ok(QueryResult::Ok("Index Created successfully".into()))
                                         }
                                     )
                                 }
@@ -553,7 +558,7 @@ impl Database {
                                             );
                                         }
 
-                                        Ok(QueryResult::Ok)
+                                        Ok(QueryResult::Ok("Index Dropped successfully".into()))
                                     })
                                 }
 
@@ -619,13 +624,17 @@ impl Database {
                                             "Inserting {} row(s)",
                                             rows.len()
                                         );
-                                        self.insert_values(&ins.table, rows)?;
+
+                                        let rows = self.insert_values(&ins.table, rows)?;
 
                                         db_info!(
                                             Component::Storage,
                                             "Insert completed successfully"
                                         );
-                                        Ok(QueryResult::Ok)
+                                        Ok(QueryResult::Ok(format!(
+                                            "{} rows inserted successfully",
+                                            rows
+                                        )))
                                     })
                                 }
 
@@ -649,13 +658,16 @@ impl Database {
                                             );
                                         }
 
-                                        execute_delete(del, &self.catalog)?;
+                                        let rows = execute_delete(del, &self.catalog)?;
 
                                         db_info!(
                                             Component::Executor,
                                             "Delete completed successfully"
                                         );
-                                        Ok(QueryResult::Ok)
+                                        Ok(QueryResult::Ok(format!(
+                                            "{} rows deleted successfully",
+                                            rows
+                                        )))
                                     })
                                 }
 
@@ -684,13 +696,16 @@ impl Database {
                                             );
                                         }
 
-                                        execute_update(upd, &self.catalog)?;
+                                        let rows = execute_update(upd, &self.catalog)?;
 
                                         db_info!(
                                             Component::Executor,
                                             "Update completed successfully"
                                         );
-                                        Ok(QueryResult::Ok)
+                                        Ok(QueryResult::Ok(format!(
+                                            "{} rows deleted successfully",
+                                            rows
+                                        )))
                                     })
                                 }
                             }
@@ -736,7 +751,9 @@ impl Database {
             QueryResult::Explain(plan) => {
                 db_info!(Component::Executor, "{:?}", plan)
             }
-            QueryResult::Ok => {}
+            QueryResult::Ok(message) => {
+                db_info!(Component::Executor, "{}", message)
+            }
         }
         Ok(res)
     }

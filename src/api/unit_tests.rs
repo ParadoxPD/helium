@@ -8,7 +8,6 @@ mod tests {
             types::DataType,
             value::Value,
         },
-        frontend::sql::binder::Binder,
     };
 
     /// Create an isolated test database
@@ -18,6 +17,7 @@ mod tests {
     }
 
     /// Build a schema from column names (Phase 1: all Int64 unless specified later)
+    #[allow(dead_code)]
     pub fn schema(cols: &[&str]) -> Schema {
         Schema {
             columns: cols
@@ -186,7 +186,7 @@ mod tests {
         let result = exec(&mut db, "CREATE INDEX idx_users_age ON users(age)");
 
         // Phase 1 decision: overwrite or ignore is allowed
-        matches!(result, QueryResult::Ok);
+        matches!(result, QueryResult::Ok(_));
     }
     #[test]
     fn drop_index_removes_from_catalog() {

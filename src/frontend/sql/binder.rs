@@ -1,15 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
-use anyhow::Error;
 use anyhow::Result;
-use anyhow::bail;
 
 use crate::common::schema::Column;
 use crate::common::schema::Schema;
 use crate::common::types::DataType;
-use crate::common::value::Value;
-use crate::exec::catalog::{self, Catalog};
+use crate::exec::catalog::Catalog;
 use crate::frontend::sql::ast::SqlType;
 use crate::frontend::sql::ast::Statement;
 use crate::frontend::sql::ast::{
@@ -34,8 +30,8 @@ pub enum BindError {
 impl fmt::Display for BindError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BindError::UnknownTable(t) => write!(f, "unknown table '{}'", t),
-            BindError::UnknownColumn(c) => write!(f, "unknown column '{}'", c),
+            BindError::UnknownTable(t) => write!(f, "'{}' table does not exist", t),
+            BindError::UnknownColumn(c) => write!(f, "'{}' column does not exist", c),
             BindError::AmbiguousColumn(c) => write!(f, "ambiguous column '{}'", c),
             BindError::ColumnCountMismatch => write!(f, "column count mismatch"),
             BindError::Unsupported => write!(f, "Unsupported Statement"),
@@ -480,7 +476,7 @@ impl<'a> Binder<'a> {
 
             let mut values = Vec::new();
 
-            for (expr, col) in row.into_iter().zip(&table.schema.columns) {
+            for (expr, _) in row.into_iter().zip(&table.schema.columns) {
                 let bound = self.bind_expr(expr)?;
                 values.push(bound);
             }

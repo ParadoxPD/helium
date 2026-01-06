@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
     use crate::api::db::QueryError;
     use crate::buffer::buffer_pool::BufferPoolHandle;
     use crate::common::schema::{Column, Schema};
@@ -8,12 +8,12 @@ mod tests {
     use crate::exec::catalog::Catalog;
     use crate::frontend::sql::ast::{FromItem, Statement};
     use crate::frontend::sql::binder::{BindError, Binder, BoundStatement};
-    use crate::frontend::sql::lower::{Lowered, lower_select};
+    
     use crate::frontend::sql::parser::Parser;
-    use crate::ir::pretty::pretty;
-    use crate::storage::table::HeapTable;
+    
+    
     use crate::{buffer::buffer_pool::BufferPool, storage::page_manager::FilePageManager};
-    use std::error::Error;
+    
     use std::sync::{Arc, Mutex};
 
     fn test_catalog() -> Catalog {

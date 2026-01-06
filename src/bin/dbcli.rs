@@ -2,7 +2,7 @@ use helium::{
     api::db::{Database, QueryResult},
     debugger::{DebugLevel, set_debug_level},
 };
-use rustyline::{DefaultEditor, Editor, Result, error::ReadlineError};
+use rustyline::{DefaultEditor, Result, error::ReadlineError};
 use std::process;
 
 fn main() -> Result<()> {
@@ -70,7 +70,9 @@ fn main() -> Result<()> {
                     Ok(QueryResult::Explain(plan)) => {
                         println!("{plan}");
                     }
-                    Ok(QueryResult::Ok) => {}
+                    Ok(QueryResult::Ok(message)) => {
+                        println!("{message}");
+                    }
                     Err(err) => {
                         eprintln!("Error: {err}");
                     }
@@ -114,4 +116,3 @@ fn handle_meta_command(cmd: &str) -> bool {
         }
     }
 }
-

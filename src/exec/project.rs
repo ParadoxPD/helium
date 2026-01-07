@@ -28,7 +28,7 @@ impl Operator for ProjectExec {
         let mut out = HashMap::new();
 
         for (expr, alias) in &self.exprs {
-            let value = ev.eval_expr(expr).unwrap_or(Value::Null);
+            let value = ev.eval_expr(expr)?.unwrap_or(Value::Null);
             out.insert(alias.clone(), value);
         }
 

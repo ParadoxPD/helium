@@ -23,7 +23,7 @@ impl Operator for FilterExec {
         println!("FilterExec.next()");
         while let Some(row) = self.input.next() {
             let ev = Evaluator::new(&row);
-            let passed = ev.eval_predicate(&self.predicate);
+            let passed = ev.eval_predicate(&self.predicate)?;
 
             println!("[FilterExec] row = {:?}, predicate = {}", row, passed);
 

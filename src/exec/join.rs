@@ -1,4 +1,3 @@
-
 use crate::exec::evaluator::Evaluator;
 use crate::exec::operator::{Operator, Row};
 use crate::ir::expr::Expr;
@@ -69,7 +68,7 @@ impl Operator for JoinExec {
                 let ev = Evaluator::new(&merged);
                 println!("JOIN ROW KEYS = {:?}", merged.values.keys());
 
-                if ev.eval_predicate(&self.on) {
+                if ev.eval_predicate(&self.on)? {
                     println!("JOIN ROW = {:?}", merged);
 
                     return Some(merged);

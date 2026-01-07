@@ -119,7 +119,7 @@ pub fn execute_delete(del: BoundDelete, catalog: &Catalog) -> Result<usize, anyh
         let ev = Evaluator::new(&row);
 
         if let Some(pred) = &del.predicate {
-            if !ev.eval_predicate(pred) {
+            if !ev.eval_predicate(pred)? {
                 continue;
             }
         }
@@ -153,14 +153,14 @@ pub fn execute_update(upd: BoundUpdate, catalog: &Catalog) -> Result<usize, anyh
         let ev = Evaluator::new(&row);
 
         if let Some(pred) = &upd.predicate {
-            if !ev.eval_predicate(pred) {
+            if !ev.eval_predicate(pred)? {
                 continue;
             }
         }
 
         let mut updated = row.values.clone();
         for (col, expr) in &upd.assignments {
-            let v = ev.eval_expr(expr).unwrap_or(Value::Null);
+            let v = ev.eval_expr(expr)?.unwrap_or(Value::Null);
             let key = format!("{}.{}", upd.table, col.name);
             updated.insert(key, v);
         }

@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+use crate::common::value::Value;
 use crate::exec::evaluator::Evaluator;
 use crate::exec::operator::{Operator, Row};
 use crate::ir::expr::Expr;
@@ -55,8 +56,8 @@ fn compare_rows(a: &Row, b: &Row, keys: &[(Expr, bool)]) -> Ordering {
     let evb = Evaluator::new(b);
 
     for (expr, asc) in keys {
-        let va = eva.eval_expr(expr);
-        let vb = evb.eval_expr(expr);
+        let va = eva.eval_expr(expr)?;
+        let vb = evb.eval_expr(expr)?;
 
         let ord = match (va, vb) {
             // NULL = NULL → equal

@@ -79,7 +79,6 @@ fn update_where_no_match() {
 }
 
 #[test]
-#[ignore = "type checking not enforced yet"]
 fn update_type_error() {
     let mut db = TestDB::new();
     db.exec("CREATE TABLE users (id INT)").unwrap();

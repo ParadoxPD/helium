@@ -3,7 +3,8 @@
 use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-static DEBUG_LEVEL: AtomicU8 = AtomicU8::new(0);
+static DEFAULT_DEBUG_LEVEL: u8 = 5;
+static DEBUG_LEVEL: AtomicU8 = AtomicU8::new(DEFAULT_DEBUG_LEVEL);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -117,4 +118,3 @@ pub fn reset_indent() {
 pub fn format_indent() -> String {
     "  ".repeat(get_indent())
 }
-

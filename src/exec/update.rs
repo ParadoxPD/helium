@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use crate::{
     common::{schema::Column, value::Value},
     exec::{
-        evaluator::Evaluator,
+        evaluator::{Evaluator, ExecError},
         operator::{Operator, Row},
     },
     ir::expr::Expr,
@@ -17,12 +17,15 @@ pub struct UpdateExec {
 }
 
 impl Operator for UpdateExec {
-    fn open(&mut self) {
-        self.input.open();
+    fn open(&mut self) -> Result<(), ExecError> {
+        self.input.open()
     }
 
-    fn next(&mut self) -> Option<Row> {
-        let row = self.input.next()?; // execution Row (qualified keys)
+    fn next(&mut self) -> Result<Option<Row>, ExecError> {
+        let row = match self.input.next()? {
+            Some(r) => r,
+            None => return Ok(None),
+        }; // execution Row (qualified keys)
         let ev = Evaluator::new(&row);
 
         // 1. Start from existing fully-qualified values
@@ -49,12 +52,12 @@ impl Operator for UpdateExec {
         self.table.delete(row.row_id);
 
         // 5. Emit execution Row (projection rebuilds values)
-        Some(Row {
+        Ok(Some(Row {
             row_id: new_rid,
             values: HashMap::new(),
-        })
+        }))
     }
-    fn close(&mut self) {
-        self.input.close();
+    fn close(&mut self) -> Result<(), ExecError> {
+        self.input.close()
     }
 }

@@ -1,4 +1,7 @@
-use crate::exec::operator::{Operator, Row};
+use crate::exec::{
+    evaluator::ExecError,
+    operator::{Operator, Row},
+};
 
 pub struct LimitExec {
     input: Box<dyn Operator>,
@@ -17,26 +20,26 @@ impl LimitExec {
 }
 
 impl Operator for LimitExec {
-    fn open(&mut self) {
-        self.input.open();
+    fn open(&mut self) -> Result<(), ExecError> {
         self.seen = 0;
+        self.input.open()
     }
 
-    fn next(&mut self) -> Option<Row> {
+    fn next(&mut self) -> Result<Option<Row>, ExecError> {
         if self.limit == 0 || self.seen >= self.limit {
-            return None;
+            return Ok(None);
         }
 
-        match self.input.next() {
+        match self.input.next()? {
             Some(row) => {
                 self.seen += 1;
-                Some(row)
+                Ok(Some(row))
             }
-            None => None,
+            None => Ok(None),
         }
     }
 
-    fn close(&mut self) {
-        self.input.close();
+    fn close(&mut self) -> Result<(), ExecError> {
+        self.input.close()
     }
 }

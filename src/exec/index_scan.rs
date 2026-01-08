@@ -4,11 +4,11 @@ use std::{
 };
 
 use crate::{
-    common::{
-        schema::Schema,
-        value::Value,
+    common::{schema::Schema, value::Value},
+    exec::{
+        evaluator::ExecError,
+        operator::{Operator, Row},
     },
-    exec::operator::{Operator, Row},
     ir::plan::IndexPredicate,
     storage::{
         btree::node::{Index, IndexKey},
@@ -70,7 +70,7 @@ impl<'a> IndexScanExec<'a> {
 }
 
 impl<'a> Operator for IndexScanExec<'a> {
-    fn open(&mut self) {
+    fn open(&mut self) -> Result<(), ExecError> {
         self.rids.clear();
         self.pos = 0;
 
@@ -90,12 +90,13 @@ impl<'a> Operator for IndexScanExec<'a> {
                     .range(&low_k.unwrap(), &high_k.unwrap());
             }
         }
+        Ok(())
     }
 
-    fn next(&mut self) -> Option<Row> {
+    fn next(&mut self) -> Result<Option<Row>, ExecError> {
         loop {
             if self.pos >= self.rids.len() {
-                return None;
+                return Ok(None);
             }
 
             let rid = self.rids[self.pos];
@@ -133,16 +134,17 @@ impl<'a> Operator for IndexScanExec<'a> {
                 }
                 println!("ROWS in Index Scan = {:?}", row);
 
-                return Some(Row {
+                return Ok(Some(Row {
                     row_id: rid,
                     values: row,
-                });
+                }));
             }
         }
     }
 
-    fn close(&mut self) {
+    fn close(&mut self) -> Result<(), ExecError> {
         self.rids.clear();
         self.pos = 0;
+        Ok(())
     }
 }

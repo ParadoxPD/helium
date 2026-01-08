@@ -5,6 +5,7 @@ use anyhow::Result;
 use crate::common::schema::Column;
 use crate::common::schema::Schema;
 use crate::common::types::DataType;
+use crate::common::value::Value;
 use crate::exec::catalog::Catalog;
 use crate::frontend::sql::ast::SqlType;
 use crate::frontend::sql::ast::Statement;
@@ -25,6 +26,16 @@ pub enum BindError {
     ColumnCountMismatch,
     Unsupported,
     EmptyTable,
+    TypeMismatch {
+        column: String,
+        expected: String,
+        found: String,
+    },
+    TypeMismatchBinary {
+        op: String,
+        left: DataType,
+        right: DataType,
+    },
 }
 
 impl fmt::Display for BindError {
@@ -37,6 +48,18 @@ impl fmt::Display for BindError {
             BindError::Unsupported => write!(f, "Unsupported Statement"),
             BindError::DuplicateColumn(c) => write!(f, "duplicate column '{}'", c),
             BindError::EmptyTable => write!(f, "table must have at least one column"),
+            BindError::TypeMismatch {
+                column,
+                expected,
+                found,
+            } => write!(
+                f,
+                "Type mismatch on column : {}, expected : {}, got : {}",
+                column, expected, found
+            ),
+            BindError::TypeMismatchBinary { op, left, right } => {
+                write!(f, "{} {} {}", op, left, right)
+            }
         }
     }
 }
@@ -442,14 +465,27 @@ impl<'a> Binder<'a> {
         self.tables.insert(stmt.table.clone(), stmt.table.clone());
 
         let mut assigns = Vec::new();
-        for (col, expr) in stmt.assignments {
+
+        for (col_name, sql_expr) in stmt.assignments {
             let column = table
                 .schema
-                .lookup(col.clone())
-                .ok_or_else(|| BindError::UnknownColumn(col.to_string()))?;
+                .lookup(col_name.clone())
+                .ok_or_else(|| BindError::UnknownColumn(col_name.clone()))?;
 
-            let bound_expr = self.bind_expr(expr)?;
-            assigns.push((column, bound_expr));
+            let ir_expr = self.bind_expr(sql_expr)?;
+
+            let expr_ty = self.infer_expr_type(&ir_expr, &col_name)?;
+
+            if expr_ty == DataType::Null && column.nullable {
+            } else if expr_ty != column.ty {
+                return Err(BindError::TypeMismatch {
+                    expected: column.ty.to_string(),
+                    found: expr_ty.to_string(),
+                    column: col_name,
+                });
+            }
+
+            assigns.push((column.clone(), ir_expr));
         }
 
         let predicate = stmt.where_clause.map(|e| self.bind_expr(e)).transpose()?;
@@ -462,13 +498,13 @@ impl<'a> Binder<'a> {
     }
 
     pub fn bind_insert(&self, stmt: InsertStmt) -> Result<BoundInsert, BindError> {
-        println!("INSERT TABLE KEYS = {:?}", self.catalog.tables.keys());
         let table = self
             .catalog
             .get_table(&stmt.table)
             .ok_or_else(|| BindError::UnknownTable(stmt.table.clone()))?;
 
         let mut bound_rows = Vec::new();
+
         for row in stmt.rows {
             if row.len() != table.schema.columns.len() {
                 return Err(BindError::ColumnCountMismatch);
@@ -476,10 +512,23 @@ impl<'a> Binder<'a> {
 
             let mut values = Vec::new();
 
-            for (expr, _) in row.into_iter().zip(&table.schema.columns) {
-                let bound = self.bind_expr(expr)?;
-                values.push(bound);
+            for (sql_expr, column) in row.into_iter().zip(&table.schema.columns) {
+                let ir_expr = self.bind_expr(sql_expr)?;
+                let ty = self.infer_expr_type(&ir_expr, &column.name)?;
+
+                if ty == DataType::Null && column.nullable {
+                    // allowed
+                } else if ty != column.ty {
+                    return Err(BindError::TypeMismatch {
+                        expected: column.ty.to_string(),
+                        found: ty.to_string(),
+                        column: column.name.clone(),
+                    });
+                }
+
+                values.push(ir_expr);
             }
+
             bound_rows.push(values);
         }
 
@@ -530,5 +579,123 @@ impl<'a> Binder<'a> {
     pub fn bind_drop_index(&self, name: String) -> Result<BoundStatement, BindError> {
         // NOTE: index existence validation can be added later
         Ok(BoundStatement::DropIndex(BoundDropIndex { name }))
+    }
+
+    pub fn infer_expr_type(
+        &self,
+        expr: &IRExpr,
+        column_name: &String,
+    ) -> Result<DataType, BindError> {
+        match expr {
+            // ---------- literals ----------
+            IRExpr::Literal(Value::Int64(_)) => Ok(DataType::Int64),
+            IRExpr::Literal(Value::Float64(_)) => Ok(DataType::Float64),
+            IRExpr::Literal(Value::Bool(_)) => Ok(DataType::Bool),
+            IRExpr::Literal(Value::String(_)) => Ok(DataType::String),
+            IRExpr::Literal(Value::Null) => Ok(DataType::Null),
+
+            // ---------- bound columns ----------
+            IRExpr::BoundColumn { table, name } => {
+                let table = self
+                    .catalog
+                    .get_table(table)
+                    .ok_or_else(|| BindError::UnknownTable(table.clone()))?;
+
+                let col = table.schema.lookup(name.to_string());
+                Ok(col.unwrap().ty)
+            }
+
+            // ---------- unary ----------
+            IRExpr::Unary { op, expr } => {
+                let inner = self.infer_expr_type(expr, column_name)?;
+
+                match op {
+                    IRUnaryOp::Neg => {
+                        if inner == DataType::Int64 {
+                            Ok(DataType::Int64)
+                        } else {
+                            Err(BindError::TypeMismatch {
+                                expected: DataType::Int64.to_string(),
+                                found: inner.to_string(),
+                                column: column_name.to_string(),
+                            })
+                        }
+                    }
+
+                    IRUnaryOp::Not => {
+                        if inner == DataType::Bool {
+                            Ok(DataType::Bool)
+                        } else {
+                            Err(BindError::TypeMismatch {
+                                expected: DataType::Bool.to_string(),
+                                found: inner.to_string(),
+                                column: column_name.to_string(),
+                            })
+                        }
+                    }
+                }
+            }
+
+            // ---------- binary ----------
+            IRExpr::Binary { left, op, right } => {
+                let l = self.infer_expr_type(left, column_name)?;
+                let r = self.infer_expr_type(right, column_name)?;
+
+                self.infer_binary_type(op, l, r)
+            }
+
+            IRExpr::Null => Ok(DataType::Null),
+
+            IRExpr::Column(_) => {
+                panic!("Unbound column reached type inference")
+            }
+        }
+    }
+
+    fn infer_binary_type(
+        &self,
+        op: &IRBinaryOp,
+        l: DataType,
+        r: DataType,
+    ) -> Result<DataType, BindError> {
+        use IRBinaryOp::*;
+
+        match op {
+            Add | Sub | Mul | Div => {
+                if l == DataType::Int64 && r == DataType::Int64 {
+                    Ok(DataType::Int64)
+                } else {
+                    Err(BindError::TypeMismatchBinary {
+                        op: format!("{:?}", op),
+                        left: l,
+                        right: r,
+                    })
+                }
+            }
+
+            Eq | Neq | Gt | Gte | Lt | Lte => {
+                if l == r || l == DataType::Null || r == DataType::Null {
+                    Ok(DataType::Bool)
+                } else {
+                    Err(BindError::TypeMismatchBinary {
+                        op: format!("{:?}", op),
+                        left: l,
+                        right: r,
+                    })
+                }
+            }
+
+            And | Or => {
+                if l == DataType::Bool && r == DataType::Bool {
+                    Ok(DataType::Bool)
+                } else {
+                    Err(BindError::TypeMismatchBinary {
+                        op: format!("{:?}", op),
+                        left: l,
+                        right: r,
+                    })
+                }
+            }
+        }
     }
 }

@@ -1,4 +1,4 @@
-use crate::{common::value::Value, storage::page::RowId};
+use crate::{common::value::Value, exec::evaluator::ExecError, storage::page::RowId};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -16,9 +16,9 @@ impl Default for Row {
 }
 
 pub trait Operator {
-    fn open(&mut self);
-    fn next(&mut self) -> Option<Row>;
-    fn close(&mut self);
+    fn open(&mut self) -> Result<(), ExecError>;
+    fn next(&mut self) -> Result<Option<Row>, ExecError>;
+    fn close(&mut self) -> Result<(), ExecError>;
 }
 
 #[derive(Default, Debug)]

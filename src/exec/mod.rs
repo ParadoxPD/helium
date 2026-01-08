@@ -89,14 +89,14 @@ pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
 pub fn execute_plan(plan: LogicalPlan, catalog: &Catalog) -> Result<QueryResult, anyhow::Error> {
     let mut op = lower(&plan, catalog);
 
-    op.open();
+    op.open()?;
 
     let mut rows = Vec::new();
-    while let Some(row) = op.next() {
+    while let Some(row) = op.next()? {
         rows.push(row);
     }
 
-    op.close();
+    op.close()?;
 
     Ok(QueryResult::Rows(rows))
 }

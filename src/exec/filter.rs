@@ -1,4 +1,4 @@
-use crate::exec::evaluator::Evaluator;
+use crate::exec::evaluator::{Evaluator, ExecError};
 use crate::exec::operator::{Operator, Row};
 use crate::ir::expr::Expr;
 
@@ -14,32 +14,26 @@ impl FilterExec {
 }
 
 impl Operator for FilterExec {
-    fn open(&mut self) {
+    fn open(&mut self) -> Result<(), ExecError> {
         println!("FilterExec.open()");
-        self.input.open();
+        self.input.open()
     }
 
-    fn next(&mut self) -> Option<Row> {
-        println!("FilterExec.next()");
-        while let Some(row) = self.input.next() {
+    fn next(&mut self) -> Result<Option<Row>, ExecError> {
+        while let Some(row) = self.input.next()? {
             let ev = Evaluator::new(&row);
             let passed = ev.eval_predicate(&self.predicate)?;
-
-            println!("[FilterExec] row = {:?}, predicate = {}", row, passed);
-
             if passed {
-                println!("[FilterExec] PASSED");
-                return Some(row);
+                return Ok(Some(row));
             } else {
-                println!("[FilterExec] REJECTED");
                 continue;
             }
         }
 
-        None
+        Ok(None)
     }
 
-    fn close(&mut self) {
-        self.input.close();
+    fn close(&mut self) -> Result<(), ExecError> {
+        self.input.close()
     }
 }

@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use crate::common::value::Value;
-use crate::exec::evaluator::Evaluator;
+use crate::exec::evaluator::{Evaluator, ExecError};
 use crate::exec::operator::{Operator, Row};
 use crate::ir::expr::Expr;
 
@@ -24,30 +24,31 @@ impl SortExec {
 }
 
 impl Operator for SortExec {
-    fn open(&mut self) {
+    fn open(&mut self) -> Result<(), ExecError> {
         self.rows.clear();
         self.idx = 0;
         self.input.open();
 
-        while let Some(row) = self.input.next() {
+        while let Some(row) = self.input.next()? {
             self.rows.push(row);
         }
 
         self.rows.sort_by(|a, b| compare_rows(a, b, &self.keys));
+        Ok(())
     }
 
-    fn next(&mut self) -> Option<Row> {
+    fn next(&mut self) -> Result<Option<Row>, ExecError> {
         if self.idx >= self.rows.len() {
-            None
+            Ok(None)
         } else {
             let row = self.rows[self.idx].clone();
             self.idx += 1;
-            Some(row)
+            Ok(Some(row))
         }
     }
 
-    fn close(&mut self) {
-        self.input.close();
+    fn close(&mut self) -> Result<(), ExecError> {
+        self.input.close()
     }
 }
 
@@ -56,8 +57,8 @@ fn compare_rows(a: &Row, b: &Row, keys: &[(Expr, bool)]) -> Ordering {
     let evb = Evaluator::new(b);
 
     for (expr, asc) in keys {
-        let va = eva.eval_expr(expr)?;
-        let vb = evb.eval_expr(expr)?;
+        let va = eva.eval_expr(expr).unwrap_or(None);
+        let vb = evb.eval_expr(expr).unwrap_or(None);
 
         let ord = match (va, vb) {
             // NULL = NULL → equal

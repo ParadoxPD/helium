@@ -1,4 +1,4 @@
-use crate::exec::evaluator::Evaluator;
+use crate::exec::evaluator::{Evaluator, ExecError};
 use crate::exec::operator::{Operator, Row};
 use crate::ir::expr::Expr;
 
@@ -37,7 +37,7 @@ impl JoinExec {
 }
 
 impl Operator for JoinExec {
-    fn open(&mut self) {
+    fn open(&mut self) -> Result<(), ExecError> {
         // Always reset state
         self.left_rows.clear();
         self.right_rows.clear();
@@ -46,18 +46,18 @@ impl Operator for JoinExec {
 
         self.left.open();
         self.right.open();
-        while let Some(row) = self.left.next() {
+        while let Some(row) = self.left.next()? {
             self.left_rows.push(row);
         }
 
-        while let Some(row) = self.right.next() {
+        while let Some(row) = self.right.next()? {
             self.right_rows.push(row);
         }
-        println!("LEFT = {:?}", self.left_rows.len());
-        println!("RIGHT = {:?}", self.right_rows.len());
+
+        Ok(())
     }
 
-    fn next(&mut self) -> Option<Row> {
+    fn next(&mut self) -> Result<Option<Row>, ExecError> {
         while self.i < self.left_rows.len() {
             while self.j < self.right_rows.len() {
                 let l = &self.left_rows[self.i];
@@ -71,7 +71,7 @@ impl Operator for JoinExec {
                 if ev.eval_predicate(&self.on)? {
                     println!("JOIN ROW = {:?}", merged);
 
-                    return Some(merged);
+                    return Ok(Some(merged));
                 }
             }
 
@@ -79,13 +79,14 @@ impl Operator for JoinExec {
             self.i += 1;
         }
 
-        None
+        Ok(None)
     }
 
-    fn close(&mut self) {
-        self.left.close();
-        self.right.close();
+    fn close(&mut self) -> Result<(), ExecError> {
+        self.left.close()?;
+        self.right.close()?;
         self.left_rows.clear();
         self.right_rows.clear();
+        Ok(())
     }
 }

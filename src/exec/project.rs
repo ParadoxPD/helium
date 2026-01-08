@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::common::value::Value;
-use crate::exec::evaluator::Evaluator;
+use crate::exec::evaluator::{Evaluator, ExecError};
 use crate::exec::operator::{Operator, Row};
 use crate::ir::expr::Expr;
 
@@ -17,12 +17,15 @@ impl ProjectExec {
 }
 
 impl Operator for ProjectExec {
-    fn open(&mut self) {
-        self.input.open();
+    fn open(&mut self) -> Result<(), ExecError> {
+        self.input.open()
     }
 
-    fn next(&mut self) -> Option<Row> {
-        let row = self.input.next()?;
+    fn next(&mut self) -> Result<Option<Row>, ExecError> {
+        let row = match self.input.next()? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
         let ev = Evaluator::new(&row);
 
         let mut out = HashMap::new();
@@ -37,13 +40,13 @@ impl Operator for ProjectExec {
             "Project output must be unqualified"
         );
 
-        Some(Row {
+        Ok(Some(Row {
             row_id: row.row_id,
             values: out,
-        })
+        }))
     }
 
-    fn close(&mut self) {
-        self.input.close();
+    fn close(&mut self) -> Result<(), ExecError> {
+        self.input.close()
     }
 }

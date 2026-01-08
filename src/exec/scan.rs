@@ -4,7 +4,10 @@ use std::sync::Arc;
 use crate::{
     db_info, db_trace,
     debugger::Component,
-    exec::operator::{Operator, Row},
+    exec::{
+        evaluator::ExecError,
+        operator::{Operator, Row},
+    },
     storage::table::{HeapTable, TableCursor},
 };
 
@@ -26,18 +29,27 @@ impl<'a> ScanExec<'a> {
 }
 
 impl<'a> Operator for ScanExec<'a> {
-    fn open(&mut self) {
+    fn open(&mut self) -> Result<(), ExecError> {
         db_info!(
             Component::Executor,
             "Opening scan on table '{}'",
             self.alias
         );
         self.cursor = Some(self.table.clone().scan());
+        Ok(())
     }
 
-    fn next(&mut self) -> Option<Row> {
+    fn next(&mut self) -> Result<Option<Row>, ExecError> {
         db_trace!(Component::Executor, "ScanExec::next() on '{}'", self.alias);
-        let (rid, storage_row) = self.cursor.as_mut()?.next()?;
+        let cursor = match self.cursor.as_mut() {
+            Some(c) => c,
+            None => return Ok(None), // not opened or already closed
+        };
+
+        let (rid, storage_row) = match cursor.next() {
+            Some(v) => v,
+            None => return Ok(None), // end of scan
+        };
         db_trace!(
             Component::Executor,
             "Found row: rid={:?}, values={:?}",
@@ -58,13 +70,14 @@ impl<'a> Operator for ScanExec<'a> {
             "ScanExec must emit exactly one qualification level"
         );
 
-        Some(Row {
+        Ok(Some(Row {
             row_id: rid,
             values: out,
-        })
+        }))
     }
 
-    fn close(&mut self) {
+    fn close(&mut self) -> Result<(), ExecError> {
         self.cursor = None;
+        Ok(())
     }
 }

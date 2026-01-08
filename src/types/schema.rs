@@ -1,47 +1,38 @@
-use crate::common::types::DataType;
+//! Schema definitions for tables and intermediate results.
+//!
+//! Schemas describe *shape*, not storage or ownership.
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+use crate::types::datatype::DataType;
+
+pub type ColumnId = u16;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Column {
+    pub id: ColumnId,
+    pub name: String,
+    pub data_type: DataType,
+    pub nullable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schema {
     pub columns: Vec<Column>,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub struct Column {
-    pub name: String,
-    pub ty: DataType,
-    pub nullable: bool,
-}
-
 impl Schema {
-    pub fn new(column_names: Vec<String>) -> Self {
-        let mut columns = Vec::new();
-        for column_name in column_names {
-            columns.push(Column {
-                name: column_name,
-                ty: DataType::Int64,
-                nullable: true,
-            })
-        }
-        Self { columns }
+    /// Number of columns in the schema.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.columns.len()
     }
 
-    /// Check if a column exists by name
-    pub fn has_column(&self, name: &str) -> bool {
-        self.columns.iter().any(|c| c.name == name)
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.columns.is_empty()
     }
 
-    /// Borrowed lookup (preferred for binder)
-    pub fn get_column(&self, name: &str) -> Option<&Column> {
-        self.columns.iter().find(|c| c.name == name)
-    }
-
-    /// Index lookup (useful later for projection pruning, offsets, etc.)
-    pub fn column_index(&self, name: &str) -> Option<usize> {
-        self.columns.iter().position(|c| c.name == name)
-    }
-
-    /// Keep your existing owned lookup (still useful sometimes)
-    pub fn lookup(&self, column_name: String) -> Option<Column> {
-        self.columns.iter().find(|c| c.name == column_name).cloned()
+    /// Lookup by column id.
+    pub fn column(&self, id: ColumnId) -> Option<&Column> {
+        self.columns.iter().find(|c| c.id == id)
     }
 }

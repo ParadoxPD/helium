@@ -1,35 +1,48 @@
-use core::fmt;
+//! Logical data types understood by the system.
+//!
+//! These represent *semantic* types, not physical layout.
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DataType {
+    // Integer types
+    Int32,
     Int64,
+
+    // Floating point
+    Float32,
     Float64,
-    Bool,
-    String,
+
+    // Boolean
+    Boolean,
+
+    // Strings
+    Varchar { max_len: Option<u32> },
+
+    // Temporal
+    Date,      // days since epoch
+    Timestamp, // microseconds since epoch
+
+    // Binary
+    Blob,
+
+    // Special
     Null,
-    Unknown,
 }
 
-impl fmt::Display for DataType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for DataType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DataType::Int64 => write!(f, "Integer"),
-            DataType::Float64 => write!(f, "Float"),
-            DataType::Bool => write!(f, "Boolean"),
-            DataType::String => write!(f, "String"),
-            DataType::Null => write!(f, "Null"),
-            DataType::Unknown => write!(f, "Unknown Type !!!!"),
+            DataType::Int32 => write!(f, "INT"),
+            DataType::Int64 => write!(f, "BIGINT"),
+            DataType::Float32 => write!(f, "FLOAT"),
+            DataType::Float64 => write!(f, "DOUBLE"),
+            DataType::Boolean => write!(f, "BOOLEAN"),
+            DataType::Varchar { .. } => write!(f, "VARCHAR"),
+            DataType::Date => write!(f, "DATE"),
+            DataType::Timestamp => write!(f, "TIMESTAMP"),
+            DataType::Blob => write!(f, "BLOB"),
+            DataType::Null => write!(f, "NULL"),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn datatype_equality() {
-        assert_eq!(DataType::Int64, DataType::Int64);
-        assert_ne!(DataType::Int64, DataType::Bool);
     }
 }

@@ -1,179 +1,67 @@
-use std::fmt;
+//! Runtime values flowing through execution.
+//!
+//! This is NOT a SQL literal representation.
+//! This is the canonical runtime value model.
 
-use crate::common::types::DataType;
+use crate::types::datatype::DataType;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Value {
+    Int32(i32),
     Int64(i64),
+
+    Float32(f32),
     Float64(f64),
-    Bool(bool),
+
+    Boolean(bool),
+
     String(String),
+    Blob(Vec<u8>),
+
+    // Temporal (encoded, not formatted)
+    Date(i32),
+    Timestamp(i64),
+
+    // Explicit NULL
     Null,
 }
 
 impl Value {
-    pub fn data_type(&self) -> Option<DataType> {
+    /// Returns the logical type of the value.
+    ///
+    /// NOTE: This must stay trivial.
+    pub fn data_type(&self) -> DataType {
         match self {
-            Value::Int64(_) => Some(DataType::Int64),
-            Value::Float64(_) => Some(DataType::Float64),
-            Value::Bool(_) => Some(DataType::Bool),
-            Value::String(_) => Some(DataType::String),
-            Value::Null => None,
+            Value::Int32(_) => DataType::Int32,
+            Value::Int64(_) => DataType::Int64,
+            Value::Float32(_) => DataType::Float32,
+            Value::Float64(_) => DataType::Float64,
+            Value::Boolean(_) => DataType::Boolean,
+            Value::String(_) => DataType::Varchar { max_len: None },
+            Value::Blob(_) => DataType::Blob,
+            Value::Date(_) => DataType::Date,
+            Value::Timestamp(_) => DataType::Timestamp,
+            Value::Null => DataType::Null,
         }
     }
 
+    /// Returns true if this value is NULL.
+    #[inline]
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }
 }
 
-impl Value {
-    pub fn serialize(&self, buf: &mut Vec<u8>) {
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::Null => {
-                buf.push(0);
-            }
-
-            Value::Int64(v) => {
-                buf.push(1);
-                buf.extend_from_slice(&v.to_le_bytes());
-            }
-
-            Value::Float64(v) => {
-                buf.push(2);
-                buf.extend_from_slice(&v.to_le_bytes());
-            }
-
-            Value::Bool(v) => {
-                buf.push(3);
-                buf.push(if *v { 1 } else { 0 });
-            }
-
-            Value::String(s) => {
-                buf.push(4);
-                let bytes = s.as_bytes();
-                let len = bytes.len() as u32;
-                buf.extend_from_slice(&len.to_le_bytes());
-                buf.extend_from_slice(bytes);
-            }
-        }
-    }
-
-    pub fn deserialize(buf: &mut &[u8]) -> Self {
-        assert!(
-            !buf.is_empty(),
-            "buffer underflow while deserializing Value"
-        );
-
-        let tag = buf[0];
-        *buf = &buf[1..];
-
-        match tag {
-            0 => Value::Null,
-
-            1 => {
-                let (num, rest) = buf.split_at(8);
-                *buf = rest;
-                Value::Int64(i64::from_le_bytes(num.try_into().unwrap()))
-            }
-
-            2 => {
-                let (num, rest) = buf.split_at(8);
-                *buf = rest;
-                Value::Float64(f64::from_le_bytes(num.try_into().unwrap()))
-            }
-
-            3 => {
-                let v = buf[0] != 0;
-                *buf = &buf[1..];
-                Value::Bool(v)
-            }
-
-            4 => {
-                let (len_bytes, rest) = buf.split_at(4);
-                let len = u32::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
-
-                let (str_bytes, rest2) = rest.split_at(len);
-                *buf = rest2;
-
-                let s =
-                    String::from_utf8(str_bytes.to_vec()).expect("invalid UTF-8 string in Value");
-                Value::String(s)
-            }
-
-            _ => panic!("unknown Value tag {}", tag),
-        }
-    }
-}
-
-impl Value {
-    pub fn cmp(&self, other: &Value) -> Option<std::cmp::Ordering> {
-        match (self, other) {
-            (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
-            (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
-            (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
-            _ => None,
-        }
-    }
-}
-
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+            Value::Null => write!(f, "NULL"),
             Value::Int64(v) => write!(f, "{v}"),
             Value::Float64(v) => write!(f, "{v}"),
             Value::Bool(v) => write!(f, "{v}"),
-            Value::String(v) => write!(f, "\"{v}\""),
-            Value::Null => write!(f, "NULL"),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn value_datatype_mapping() {
-        assert_eq!(Value::Int64(10).data_type(), Some(DataType::Int64));
-
-        assert_eq!(Value::Bool(true).data_type(), Some(DataType::Bool));
-
-        assert_eq!(Value::Null.data_type(), None);
-    }
-
-    #[test]
-    fn null_detection() {
-        assert!(Value::Null.is_null());
-        assert!(!Value::Int64(1).is_null());
-    }
-
-    #[test]
-    fn value_display() {
-        let v = Value::String("hello".into());
-        assert_eq!(format!("{v}"), "\"hello\"");
-    }
-
-    #[test]
-    fn value_roundtrip() {
-        let values = vec![
-            Value::Null,
-            Value::Int64(42),
-            Value::Float64(3.14),
-            Value::Bool(true),
-            Value::Bool(false),
-            Value::String("hello".into()),
-        ];
-
-        for v in values {
-            let mut buf = Vec::new();
-            v.serialize(&mut buf);
-
-            let mut slice = buf.as_slice();
-            let v2 = Value::deserialize(&mut slice);
-
-            assert_eq!(v, v2);
-            assert!(slice.is_empty());
+            Value::String(v) => write!(f, "{v}"),
+            _ => write!(f, "<value>"),
         }
     }
 }

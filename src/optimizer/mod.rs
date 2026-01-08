@@ -1,17 +1,3 @@
-pub mod constant_fold;
-pub mod index_selection;
-pub mod predicate_pushdown;
-pub mod projection_prune;
-pub mod unit_tests;
-
-use crate::exec::catalog::Catalog;
-use crate::ir::plan::LogicalPlan;
-
-use crate::optimizer::{
-    constant_fold::constant_fold, index_selection::index_selection,
-    predicate_pushdown::predicate_pushdown, projection_prune::projection_prune,
-};
-
 pub fn optimize(plan: &LogicalPlan, catalog: &Catalog) -> LogicalPlan {
     let plan = constant_fold(plan);
     let plan = predicate_pushdown(&plan);

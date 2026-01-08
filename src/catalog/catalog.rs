@@ -1,139 +1,115 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::collections::HashMap;
 
-use anyhow::{Result, anyhow, bail};
+use crate::catalog::errors::CatalogError;
+use crate::catalog::ids::*;
+use crate::catalog::index::IndexMeta;
+use crate::catalog::table::TableMeta;
 
-use crate::{
-    buffer::buffer_pool::BufferPoolHandle,
-    common::{schema::Schema, value::Value},
-    storage::{btree::node::Index, page::RowId, table::HeapTable},
-};
-
-const DEFAULT_PAGE_CAPACITY: usize = 256;
-
-#[derive(Clone)]
-pub struct IndexEntry {
-    pub name: String,
-    pub table: String,
-    pub column: String,
-    pub index: Arc<Mutex<dyn Index>>,
-}
-
-#[derive(Clone)]
 pub struct Catalog {
-    pub tables: HashMap<String, TableEntry>,
-    pub indexes: HashMap<String, IndexEntry>,
-}
+    next_table_id: u32,
+    next_column_id: u32,
+    next_index_id: u32,
 
-#[derive(Clone)]
-pub struct TableEntry {
-    pub name: String,
-    pub schema: Schema,
-    pub heap: Arc<HeapTable>,
+    tables_by_id: HashMap<TableId, TableMeta>,
+    tables_by_name: HashMap<String, TableId>,
+
+    indexes_by_id: HashMap<IndexId, IndexMeta>,
+    indexes_by_name: HashMap<String, IndexId>,
 }
 
 impl Catalog {
     pub fn new() -> Self {
         Self {
-            tables: HashMap::new(),
-            indexes: HashMap::new(),
+            next_table_id: 1,
+            next_column_id: 1,
+            next_index_id: 1,
+            tables_by_id: HashMap::new(),
+            tables_by_name: HashMap::new(),
+            indexes_by_id: HashMap::new(),
+            indexes_by_name: HashMap::new(),
         }
     }
 
-    pub fn add_index(
-        &mut self,
-        name: String,
-        table: String,
-        column: String,
-        index: Arc<Mutex<dyn Index>>,
-    ) {
-        self.indexes.insert(
-            name.clone(),
-            IndexEntry {
-                name,
-                table,
-                column,
-                index,
-            },
-        );
-    }
-
-    pub fn drop_index(&mut self, name: &str) -> bool {
-        self.indexes.remove(name).is_some()
-    }
-
-    pub fn get_index(&self, table: &str, column: &str) -> Option<Arc<Mutex<dyn Index>>> {
-        self.indexes
-            .values()
-            .find(|e| e.table == table && e.column == column)
-            .map(|e| e.index.clone())
-    }
-
-    pub fn get_table(&self, name: &str) -> Option<&TableEntry> {
-        self.tables.get(name)
-    }
-
-    pub fn get_table_mut(&mut self, name: &str) -> Option<&mut TableEntry> {
-        self.tables.get_mut(name)
-    }
-
-    pub fn table_exists(&self, name: &str) -> bool {
-        self.tables.contains_key(name)
-    }
-
-    pub fn indexes_for_table(&self, table: &str) -> Vec<&IndexEntry> {
-        self.indexes.values().filter(|e| e.table == table).collect()
-    }
+    // ---------- table API ----------
 
     pub fn create_table(
         &mut self,
-        table_name: String,
-        schema: Schema,
-        buffer_pool: BufferPoolHandle,
-    ) -> Result<()> {
-        println!("Creating table in catalog : {}", table_name);
-        if self.tables.contains_key(&table_name) {
-            bail!("table already exists");
+        name: String,
+        columns: Vec<(String, crate::types::datatype::DataType, bool)>,
+    ) -> Result<TableId, CatalogError> {
+        if self.tables_by_name.contains_key(&name) {
+            return Err(CatalogError::TableExists(name));
         }
 
-        let heap = Arc::new(HeapTable::new(
-            table_name.clone(),
-            schema.clone(),
-            DEFAULT_PAGE_CAPACITY,
-            buffer_pool,
-        ));
+        let table_id = TableId(self.next_table_id);
+        self.next_table_id += 1;
 
-        self.tables.insert(
-            table_name.clone(),
-            TableEntry {
-                name: table_name,
-                schema,
-                heap,
-            },
-        );
-        println!("{:?}", self.tables.keys());
+        let mut cols = Vec::new();
+        for (name, ty, nullable) in columns {
+            let col_id = ColumnId(self.next_column_id);
+            self.next_column_id += 1;
 
-        Ok(())
+            cols.push(crate::catalog::column::ColumnMeta {
+                id: col_id,
+                name,
+                data_type: ty,
+                nullable,
+            });
+        }
+
+        let meta = TableMeta {
+            id: table_id,
+            name: name.clone(),
+            columns: cols,
+        };
+
+        self.tables_by_name.insert(name, table_id);
+        self.tables_by_id.insert(table_id, meta);
+
+        Ok(table_id)
     }
 
-    pub fn drop_table(&mut self, name: &str) -> Result<()> {
-        self.tables
-            .remove(name)
-            .ok_or_else(|| anyhow!("table not found"))?;
-
-        self.indexes.retain(|_, e| e.table != name);
-
-        Ok(())
+    pub fn get_table_by_id(&self, id: TableId) -> Option<&TableMeta> {
+        self.tables_by_id.get(&id)
     }
 
-    pub fn insert_row(&self, table: &str, values: Vec<Value>) -> Result<RowId> {
-        let entry = self
-            .tables
-            .get(table)
-            .ok_or_else(|| anyhow!("table not found"))?;
+    pub fn get_table_by_name(&self, name: &str) -> Option<&TableMeta> {
+        self.tables_by_name
+            .get(name)
+            .and_then(|id| self.tables_by_id.get(id))
+    }
 
-        Ok(entry.heap.insert(values))
+    // ---------- index API ----------
+
+    pub fn create_index(
+        &mut self,
+        name: String,
+        table_id: TableId,
+        column_ids: Vec<ColumnId>,
+        unique: bool,
+    ) -> Result<IndexId, CatalogError> {
+        if self.indexes_by_name.contains_key(&name) {
+            return Err(CatalogError::IndexExists(name));
+        }
+
+        let index_id = IndexId(self.next_index_id);
+        self.next_index_id += 1;
+
+        let meta = IndexMeta {
+            id: index_id,
+            name: name.clone(),
+            table_id,
+            column_ids,
+            unique,
+        };
+
+        self.indexes_by_name.insert(name, index_id);
+        self.indexes_by_id.insert(index_id, meta);
+
+        Ok(index_id)
+    }
+
+    pub fn get_index_by_id(&self, id: IndexId) -> Option<&IndexMeta> {
+        self.indexes_by_id.get(&id)
     }
 }

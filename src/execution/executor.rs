@@ -1,4 +1,3 @@
-use crate::{common::value::Value, exec::evaluator::ExecError, storage::page::RowId};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,7 +81,7 @@ pub fn lower(plan: &LogicalPlan, catalog: &Catalog) -> Box<dyn Operator> {
     }
 }
 
-pub fn execute_plan(plan: LogicalPlan, catalog: &Catalog) -> Result<QueryResult, anyhow::Error> {
+pub fn executor(plan: LogicalPlan, catalog: &Catalog) -> Result<QueryResult, anyhow::Error> {
     let mut op = lower(&plan, catalog);
 
     op.open()?;

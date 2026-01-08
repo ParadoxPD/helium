@@ -1,3 +1,7 @@
+use core::fmt;
+
+use crate::types::datatype::DataType;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindError {
     UnknownTable(String),
@@ -12,6 +16,11 @@ pub enum BindError {
         expected: String,
         found: String,
     },
+    TypeMismatchUnary {
+        op: String,
+        found: DataType,
+    },
+
     TypeMismatchBinary {
         op: String,
         left: DataType,
@@ -41,10 +50,9 @@ impl fmt::Display for BindError {
             BindError::TypeMismatchBinary { op, left, right } => {
                 write!(f, "{} {} {}", op, left, right)
             }
+            BindError::TypeMismatchUnary { op, found } => todo!(),
         }
     }
 }
 
 impl std::error::Error for BindError {}
-
-

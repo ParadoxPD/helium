@@ -1,8 +1,8 @@
 use std::fmt;
 
 use crate::{
-    common::value::Value,
     frontend::sql::{lexer::Token, parser::Position},
+    types::value::Value,
 };
 
 #[derive(Debug, Clone, PartialEq)]

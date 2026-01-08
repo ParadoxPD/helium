@@ -1,4 +1,4 @@
-use crate::{db_trace, debugger::Component, frontend::sql::parser::Position};
+use crate::{db_trace, diagnostics::debugger::Component, frontend::sql::parser::Position};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {

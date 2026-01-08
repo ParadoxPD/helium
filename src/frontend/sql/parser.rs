@@ -1,8 +1,8 @@
 use crate::{
-    common::value::Value,
     db_debug, db_info, db_scope, db_trace,
-    debugger::{Component, debugger::DebugLevel},
+    diagnostics::debugger::{Component, DebugLevel},
     frontend::sql::lexer::{Token, Tokenizer},
+    types::value::Value,
 };
 
 use super::ast::*;

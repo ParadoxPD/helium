@@ -1,3 +1,4 @@
+mod eval_expr;
 mod executor;
 mod operators;
 mod runtime;

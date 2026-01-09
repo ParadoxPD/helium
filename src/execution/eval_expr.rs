@@ -1,183 +1,65 @@
-use crate::common::value::Value;
-use crate::exec::operator::Row;
-use crate::ir::expr::{BinaryOp as IRBinaryOp, Expr as IRExpr, UnaryOp as IRUnaryOp};
+use crate::ir::expr::{BinaryOp, Expr, UnaryOp};
+use crate::types::value::Value;
 
-#[derive(Debug)]
-pub enum ExecError {
-    DivisionByZero,
-    TypeMismatch {
-        op: String,
-        left: Value,
-        right: Option<Value>,
-    },
-    InvalidUnary {
-        op: String,
-        value: Value,
-    },
-    NonBooleanPredicate(Value),
+pub fn eval_expr(expr: &Expr, row: &[Value]) -> Value {
+    match expr {
+        Expr::Literal(v) => v.clone(),
+        Expr::Null => Value::Null,
+
+        Expr::BoundColumn { index, .. } => row[*index].clone(),
+
+        Expr::Unary { op, expr } => {
+            let v = eval_expr(expr, row);
+            eval_unary(*op, v)
+        }
+
+        Expr::Binary { left, op, right } => {
+            let l = eval_expr(left, row);
+            let r = eval_expr(right, row);
+            eval_binary(*op, l, r)
+        }
+
+        Expr::Column(_) => {
+            panic!("Unbound column reached execution");
+        }
+    }
 }
 
-pub type EvalResult<T> = Result<Option<T>, ExecError>;
+fn eval_unary(op: UnaryOp, v: Value) -> Value {
+    match (op, v) {
+        (_, Value::Null) => Value::Null,
 
-impl std::fmt::Display for ExecError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        (UnaryOp::Neg, Value::Int64(x)) => Value::Int64(-x),
+        (UnaryOp::Not, Value::Bool(b)) => Value::Bool(!b),
+
+        _ => panic!("Invalid unary operation"),
     }
 }
 
-impl std::error::Error for ExecError {}
+fn eval_binary(op: BinaryOp, l: Value, r: Value) -> Value {
+    use BinaryOp::*;
 
-pub struct Evaluator<'a> {
-    row: &'a Row,
-}
+    match (op, l, r) {
+        (_, Value::Null, _) | (_, _, Value::Null) => Value::Null,
 
-impl<'a> Evaluator<'a> {
-    pub fn new(row: &'a Row) -> Self {
-        Self { row }
-    }
+        (Add, Value::Int64(a), Value::Int64(b)) => Value::Int64(a + b),
+        (Sub, Value::Int64(a), Value::Int64(b)) => Value::Int64(a - b),
+        (Mul, Value::Int64(a), Value::Int64(b)) => Value::Int64(a * b),
 
-    pub fn eval_expr(&self, expr: &IRExpr) -> EvalResult<Value> {
-        match expr {
-            IRExpr::Literal(v) => Ok(Some(v.clone())),
-            IRExpr::Null => Ok(None),
+        (Div, _, Value::Int64(0)) => panic!("Division by zero"),
+        (Div, Value::Int64(a), Value::Int64(b)) => Value::Int64(a / b),
 
-            IRExpr::BoundColumn { table, name } => {
-                Ok(self.row.values.get(&format!("{table}.{name}")).cloned())
-            }
+        (Eq, a, b) => Value::Bool(a == b),
+        (Neq, a, b) => Value::Bool(a != b),
 
-            IRExpr::Column(_) => {
-                panic!("BUG: AST Expr::Column reached execution");
-            }
+        (Lt, Value::Int64(a), Value::Int64(b)) => Value::Bool(a < b),
+        (Lte, Value::Int64(a), Value::Int64(b)) => Value::Bool(a <= b),
+        (Gt, Value::Int64(a), Value::Int64(b)) => Value::Bool(a > b),
+        (Gte, Value::Int64(a), Value::Int64(b)) => Value::Bool(a >= b),
 
-            IRExpr::Unary { op, expr } => {
-                let v = self.eval_expr(expr)?;
-                self.eval_unary(*op, v)
-            }
+        (And, Value::Bool(a), Value::Bool(b)) => Value::Bool(a && b),
+        (Or, Value::Bool(a), Value::Bool(b)) => Value::Bool(a || b),
 
-            IRExpr::Binary { left, op, right } => {
-                match op {
-                    // arithmetic
-                    IRBinaryOp::Add | IRBinaryOp::Sub | IRBinaryOp::Mul | IRBinaryOp::Div => {
-                        self.eval_arithmetic(*op, left, right)
-                    }
-
-                    // logical / comparison
-                    _ => {
-                        let b = self.eval_bool(expr)?;
-                        Ok(b.map(Value::Bool))
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn eval_predicate(&self, expr: &IRExpr) -> Result<bool, ExecError> {
-        match self.eval_bool(expr)? {
-            Some(true) => Ok(true),
-            Some(false) | None => Ok(false), // SQL semantics
-        }
-    }
-    fn eval_bool(&self, expr: &IRExpr) -> EvalResult<bool> {
-        match expr {
-            IRExpr::Literal(Value::Bool(b)) => Ok(Some(*b)),
-            IRExpr::Literal(Value::Null) => Ok(None),
-
-            IRExpr::Unary {
-                op: IRUnaryOp::Not,
-                expr,
-            } => match self.eval_bool(expr)? {
-                Some(b) => Ok(Some(!b)),
-                None => Ok(None),
-            },
-
-            IRExpr::Binary { left, op, right } => match op {
-                IRBinaryOp::And => self.eval_and(left, right),
-                IRBinaryOp::Or => self.eval_or(left, right),
-
-                IRBinaryOp::Eq
-                | IRBinaryOp::Neq
-                | IRBinaryOp::Gt
-                | IRBinaryOp::Gte
-                | IRBinaryOp::Lt
-                | IRBinaryOp::Lte => self.eval_compare(*op, left, right),
-
-                _ => Err(ExecError::NonBooleanPredicate(
-                    self.eval_expr(expr)?.unwrap_or(Value::Null),
-                )),
-            },
-
-            _ => Err(ExecError::NonBooleanPredicate(
-                self.eval_expr(expr)?.unwrap_or(Value::Null),
-            )),
-        }
-    }
-
-    fn eval_and(&self, l: &IRExpr, r: &IRExpr) -> EvalResult<bool> {
-        match (self.eval_bool(l)?, self.eval_bool(r)?) {
-            (Some(false), _) => Ok(Some(false)),
-            (_, Some(false)) => Ok(Some(false)),
-            (Some(true), Some(true)) => Ok(Some(true)),
-            _ => Ok(None),
-        }
-    }
-
-    fn eval_or(&self, l: &IRExpr, r: &IRExpr) -> EvalResult<bool> {
-        match (self.eval_bool(l)?, self.eval_bool(r)?) {
-            (Some(true), _) => Ok(Some(true)),
-            (_, Some(true)) => Ok(Some(true)),
-            (Some(false), Some(false)) => Ok(Some(false)),
-            _ => Ok(None),
-        }
-    }
-
-    fn eval_compare(&self, op: IRBinaryOp, l: &IRExpr, r: &IRExpr) -> EvalResult<bool> {
-        let l = self.eval_expr(l)?;
-        let r = self.eval_expr(r)?;
-
-        match (op, &l, &r) {
-            (_, None, _) | (_, _, None) => Ok(None),
-
-            (IRBinaryOp::Eq, Some(a), Some(b)) => Ok(Some(a == b)),
-            (IRBinaryOp::Gt, Some(Value::Int64(a)), Some(Value::Int64(b))) => Ok(Some(a > b)),
-
-            _ => Err(ExecError::TypeMismatch {
-                op: format!("{:?}", op),
-                left: l.unwrap(),
-                right: Some(r.unwrap()),
-            }),
-        }
-    }
-
-    fn eval_arithmetic(&self, op: IRBinaryOp, l: &IRExpr, r: &IRExpr) -> EvalResult<Value> {
-        let lv = self.eval_expr(l)?;
-        let rv = self.eval_expr(r)?;
-
-        match (op, &lv, &rv) {
-            (_, None, _) | (_, _, None) => Ok(None),
-
-            (IRBinaryOp::Add, Some(Value::Int64(a)), Some(Value::Int64(b))) => {
-                Ok(Some(Value::Int64(a + b)))
-            }
-
-            (IRBinaryOp::Div, _, Some(Value::Int64(0))) => Err(ExecError::DivisionByZero),
-
-            _ => Err(ExecError::TypeMismatch {
-                op: format!("{:?}", op),
-                left: lv.unwrap(),
-                right: rv,
-            }),
-        }
-    }
-    fn eval_unary(&self, op: IRUnaryOp, v: Option<Value>) -> EvalResult<Value> {
-        match (op, &v) {
-            (_, None) => Ok(None),
-
-            (IRUnaryOp::Neg, Some(Value::Int64(x))) => Ok(Some(Value::Int64(-x))),
-
-            _ => Err(ExecError::InvalidUnary {
-                op: format!("{:?}", op),
-                value: v.unwrap(),
-            }),
-        }
+        _ => panic!("Invalid binary operation"),
     }
 }

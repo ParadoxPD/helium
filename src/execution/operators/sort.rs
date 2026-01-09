@@ -1,81 +1,89 @@
-use std::cmp::Ordering;
+use crate::execution::context::ExecutionContext;
+use crate::execution::eval_expr::eval_expr;
+use crate::execution::executor::{Executor, Row};
+use crate::ir::plan::SortKey;
+use crate::types::value::Value;
 
-use crate::common::value::Value;
-use crate::exec::evaluator::{Evaluator, ExecError};
-use crate::exec::operator::{Operator, Row};
-use crate::ir::expr::Expr;
+pub struct SortExecutor {
+    input: Box<dyn Executor>,
+    keys: Vec<SortKey>,
 
-pub struct SortExec {
-    input: Box<dyn Operator>,
-    keys: Vec<(Expr, bool)>,
-    rows: Vec<Row>,
-    idx: usize,
+    // runtime state
+    buffer: Vec<Row>,
+    pos: usize,
 }
 
-impl SortExec {
-    pub fn new(input: Box<dyn Operator>, keys: Vec<(Expr, bool)>) -> Self {
+impl SortExecutor {
+    pub fn new(input: Box<dyn Executor>, keys: Vec<SortKey>) -> Self {
         Self {
             input,
             keys,
-            rows: Vec::new(),
-            idx: 0,
+            buffer: Vec::new(),
+            pos: 0,
         }
     }
 }
 
-impl Operator for SortExec {
-    fn open(&mut self) -> Result<(), ExecError> {
-        self.rows.clear();
-        self.idx = 0;
-        self.input.open();
+impl Executor for SortExecutor {
+    fn open(&mut self, ctx: &ExecutionContext) {
+        self.buffer.clear();
+        self.pos = 0;
 
-        while let Some(row) = self.input.next()? {
-            self.rows.push(row);
+        self.input.open(ctx);
+
+        // 1. Drain child
+        while let Some(row) = self.input.next() {
+            self.buffer.push(row);
         }
 
-        self.rows.sort_by(|a, b| compare_rows(a, b, &self.keys));
-        Ok(())
+        // 2. Sort buffer
+        let keys = self.keys.clone();
+        self.buffer.sort_by(|a, b| compare_rows(a, b, &keys));
     }
 
-    fn next(&mut self) -> Result<Option<Row>, ExecError> {
-        if self.idx >= self.rows.len() {
-            Ok(None)
-        } else {
-            let row = self.rows[self.idx].clone();
-            self.idx += 1;
-            Ok(Some(row))
+    fn next(&mut self) -> Option<Row> {
+        if self.pos >= self.buffer.len() {
+            return None;
         }
+
+        let row = self.buffer[self.pos].clone();
+        self.pos += 1;
+        Some(row)
     }
 
-    fn close(&mut self) -> Result<(), ExecError> {
-        self.input.close()
+    fn close(&mut self) {
+        self.buffer.clear();
+        self.pos = 0;
+        self.input.close();
     }
 }
 
-fn compare_rows(a: &Row, b: &Row, keys: &[(Expr, bool)]) -> Ordering {
-    let eva = Evaluator::new(a);
-    let evb = Evaluator::new(b);
+use std::cmp::Ordering;
 
-    for (expr, asc) in keys {
-        let va = eva.eval_expr(expr).unwrap_or(None);
-        let vb = evb.eval_expr(expr).unwrap_or(None);
+fn compare_rows(a: &Row, b: &Row, keys: &[SortKey]) -> Ordering {
+    for key in keys {
+        let va = eval_expr(&key.expr, a);
+        let vb = eval_expr(&key.expr, b);
 
-        let ord = match (va, vb) {
-            // NULL = NULL → equal
-            (None, None) => Ordering::Equal,
-
-            // NULLS LAST (default SQL behavior)
-            (None, Some(_)) => Ordering::Greater,
-            (Some(_), None) => Ordering::Less,
-
-            // Both non-NULL → compare values
-            (Some(x), Some(y)) => x.cmp(&y).expect("Error"),
-        };
+        let ord = compare_values(&va, &vb);
 
         if ord != Ordering::Equal {
-            return if *asc { ord } else { ord.reverse() };
+            return if key.asc { ord } else { ord.reverse() };
         }
     }
 
     Ordering::Equal
+}
+
+fn compare_values(a: &Value, b: &Value) -> Ordering {
+    use Ordering::*;
+
+    match (a, b) {
+        // NULLs sort last (Postgres / SQLite default)
+        (Value::Null, Value::Null) => Equal,
+        (Value::Null, _) => Greater,
+        (_, Value::Null) => Less,
+
+        _ => a.cmp(b).unwrap_or(Equal), // type mismatch should not happen
+    }
 }

@@ -1,3 +1,3 @@
-pub mod buffer_pool;
 pub mod frame;
+pub mod pool;
 pub mod replacer;

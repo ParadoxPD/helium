@@ -1,83 +1,64 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use crate::{
-    db_info, db_trace,
-    debugger::Component,
-    exec::{
-        evaluator::ExecError,
-        operator::{Operator, Row},
+    catalog::ids::TableId,
+    db_trace,
+    diagnostics::debugger::Component,
+    execution::{
+        context::ExecutionContext,
+        executor::{Executor, Row},
     },
-    storage::table::{HeapTable, TableCursor},
+    storage::heap::table::{HeapCursor, HeapTable},
 };
 
-pub struct ScanExec<'a> {
-    table: Arc<HeapTable>,
-    cursor: Option<Box<dyn TableCursor + 'a>>,
-    alias: String,
+pub struct ScanExecutor {
+    table_id: TableId,
+    cursor: Option<HeapCursor>,
 }
 
-impl<'a> ScanExec<'a> {
-    pub fn new(table: Arc<HeapTable>, alias: String, _: Vec<String>) -> Self {
-        println!("SCANNING {}", alias);
+impl ScanExecutor {
+    pub fn new(table_id: TableId) -> Self {
         Self {
-            table,
+            table_id,
             cursor: None,
-            alias,
         }
     }
 }
 
-impl<'a> Operator for ScanExec<'a> {
-    fn open(&mut self) -> Result<(), ExecError> {
-        db_info!(
+impl Executor for ScanExecutor {
+    fn open(&mut self, ctx: &ExecutionContext) {
+        db_trace!(
             Component::Executor,
             "Opening scan on table '{}'",
             self.alias
         );
         self.cursor = Some(self.table.clone().scan());
-        Ok(())
+        let table = ctx
+            .catalog
+            .get_table_by_id(self.table_id)
+            .expect("table must exist at execution time");
+
+        // IMPORTANT: execution only grabs the heap handle
+        let heap: &HeapTable = table.heap(); // adapt to your API
+        self.cursor = Some(heap.scan());
     }
 
-    fn next(&mut self) -> Result<Option<Row>, ExecError> {
+    fn next(&mut self) -> Option<Row> {
         db_trace!(Component::Executor, "ScanExec::next() on '{}'", self.alias);
-        let cursor = match self.cursor.as_mut() {
-            Some(c) => c,
-            None => return Ok(None), // not opened or already closed
-        };
+        let cursor = self.cursor.as_mut()?;
 
-        let (rid, storage_row) = match cursor.next() {
-            Some(v) => v,
-            None => return Ok(None), // end of scan
-        };
+        let (row_id, storage_row) = cursor.next()?;
         db_trace!(
             Component::Executor,
-            "Found row: rid={:?}, values={:?}",
-            rid,
+            "Found row: row id = {:?}, values = {:?}",
+            row_id,
             storage_row.values
         );
 
-        let schema = self.table.schema();
-
-        let mut out = HashMap::with_capacity(schema.columns.len());
-
-        for (col, value) in schema.columns.iter().zip(storage_row.values.iter()) {
-            out.insert(format!("{}.{}", self.alias, col.name), value.clone());
-        }
-
-        debug_assert!(
-            out.keys().all(|k| k.matches('.').count() == 1),
-            "ScanExec must emit exactly one qualification level"
-        );
-
-        Ok(Some(Row {
-            row_id: rid,
-            values: out,
-        }))
+        // IMPORTANT INVARIANT:
+        // storage_row.values is already Vec<Value> in schema order
+        Some(storage_row.values.clone())
     }
 
-    fn close(&mut self) -> Result<(), ExecError> {
+    fn close(&mut self) {
         self.cursor = None;
-        Ok(())
     }
 }

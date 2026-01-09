@@ -1,150 +1,81 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use crate::catalog::ids::{IndexId, TableId};
+use crate::execution::context::ExecutionContext;
+use crate::execution::executor::{Executor, Row};
+use crate::ir::index_predicate::IndexPredicate;
+use crate::storage::page::RowId;
 
-use crate::{
-    common::{schema::Schema, value::Value},
-    exec::{
-        evaluator::ExecError,
-        operator::{Operator, Row},
-    },
-    ir::plan::IndexPredicate,
-    storage::{
-        btree::node::{Index, IndexKey},
-        page::{RowId, StorageRow},
-        table::HeapTable,
-    },
-};
-
-pub struct IndexScanExec<'a> {
-    table: Arc<HeapTable>,
-    index: Arc<Mutex<dyn Index + 'a>>,
+pub struct IndexScanExecutor {
+    table_id: TableId,
+    index_id: IndexId,
     predicate: IndexPredicate,
 
-    table_alias: String,
-    column_name: String,
-    schema: Schema,
-
+    // runtime state
     rids: Vec<RowId>,
     pos: usize,
 }
 
-impl<'a> IndexScanExec<'a> {
-    pub fn new(
-        table: Arc<HeapTable>,
-        table_alias: String,
-        index: Arc<Mutex<dyn Index + 'a>>,
-        predicate: IndexPredicate,
-        column_name: String,
-        schema: Schema,
-    ) -> Self {
+impl IndexScanExecutor {
+    pub fn new(table_id: TableId, index_id: IndexId, predicate: IndexPredicate) -> Self {
         Self {
-            table,
-            index,
+            table_id,
+            index_id,
             predicate,
-            table_alias,
-            column_name,
-            schema,
             rids: Vec::new(),
             pos: 0,
         }
     }
-
-    fn predicate_matches(row: &StorageRow, column_idx: usize, pred: &IndexPredicate) -> bool {
-        let value = &row.values[column_idx];
-
-        match pred {
-            IndexPredicate::Eq(v) => value == v,
-
-            IndexPredicate::Range { low, high } => match (value, low, high) {
-                (Value::Int64(v), Value::Int64(l), Value::Int64(h)) => *v >= *l && *v <= *h,
-                (Value::Float64(v), Value::Float64(l), Value::Float64(h)) => *v >= *l && *v <= *h,
-                (Value::String(v), Value::String(l), Value::String(h)) => v >= l && v <= h,
-
-                // NULL or mismatched types → predicate fails
-                _ => false,
-            },
-        }
-    }
 }
 
-impl<'a> Operator for IndexScanExec<'a> {
-    fn open(&mut self) -> Result<(), ExecError> {
+impl Executor for IndexScanExecutor {
+    fn open(&mut self, ctx: &ExecutionContext) {
         self.rids.clear();
         self.pos = 0;
+
+        let index = ctx
+            .catalog
+            .get_index_by_id(self.index_id)
+            .expect("index must exist");
+
+        let index_handle = index.handle(); // adapt to your API
 
         match &self.predicate {
             IndexPredicate::Eq(v) => {
-                let key = IndexKey::try_from(v);
-                self.rids = self.index.lock().unwrap().get(&key.unwrap());
+                let key = index_handle.make_key(v);
+                self.rids = index_handle.get(&key);
             }
 
             IndexPredicate::Range { low, high } => {
-                let low_k = IndexKey::try_from(low);
-                let high_k = IndexKey::try_from(high);
-                self.rids = self
-                    .index
-                    .lock()
-                    .unwrap()
-                    .range(&low_k.unwrap(), &high_k.unwrap());
-            }
-        }
-        Ok(())
-    }
-
-    fn next(&mut self) -> Result<Option<Row>, ExecError> {
-        loop {
-            if self.pos >= self.rids.len() {
-                return Ok(None);
-            }
-
-            let rid = self.rids[self.pos];
-            self.pos += 1;
-
-            let storage = self.table.fetch(rid);
-
-            let col_idx = self
-                .table
-                .schema()
-                .columns
-                .iter()
-                .position(|c| c.name == self.column_name)
-                .unwrap();
-
-            if Self::predicate_matches(&storage, col_idx, &self.predicate) {
-                let mut row = HashMap::new();
-
-                if self.schema.columns.len() == 1 && self.schema.columns[0].name == "*" {
-                    // SELECT *
-                    for (i, col) in self.table.schema().columns.iter().enumerate() {
-                        row.insert(
-                            format!("{}.{}", self.table_alias, col.name),
-                            storage.values[i].clone(),
-                        );
-                    }
-                } else {
-                    // explicit projection
-                    for (i, col) in self.schema.columns.iter().enumerate() {
-                        row.insert(
-                            format!("{}.{}", self.table_alias, col.name),
-                            storage.values[i].clone(),
-                        );
-                    }
-                }
-                println!("ROWS in Index Scan = {:?}", row);
-
-                return Ok(Some(Row {
-                    row_id: rid,
-                    values: row,
-                }));
+                let low_k = index_handle.make_key(low);
+                let high_k = index_handle.make_key(high);
+                self.rids = index_handle.range(&low_k, &high_k);
             }
         }
     }
 
-    fn close(&mut self) -> Result<(), ExecError> {
+    fn next(&mut self) -> Option<Row> {
+        if self.pos >= self.rids.len() {
+            return None;
+        }
+
+        let rid = self.rids[self.pos];
+        self.pos += 1;
+
+        let table = ctx
+            .catalog
+            .get_table_by_id(self.table_id)
+            .expect("table must exist");
+
+        let heap = table.heap();
+        let storage_row = heap.fetch(rid);
+
+        // IMPORTANT:
+        // storage_row.values is Vec<Value> in schema order
+        Some(storage_row.values.clone())
+    }
+
+    fn close(&mut self) {
         self.rids.clear();
         self.pos = 0;
-        Ok(())
     }
 }
+

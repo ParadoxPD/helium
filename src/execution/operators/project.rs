@@ -1,52 +1,37 @@
-use std::collections::HashMap;
-
-use crate::common::value::Value;
-use crate::exec::evaluator::{Evaluator, ExecError};
-use crate::exec::operator::{Operator, Row};
+use crate::execution::context::ExecutionContext;
+use crate::execution::eval_expr::eval_expr;
+use crate::execution::executor::{Executor, Row};
 use crate::ir::expr::Expr;
 
-pub struct ProjectExec {
-    input: Box<dyn Operator>,
-    exprs: Vec<(Expr, String)>,
+pub struct ProjectExecutor {
+    input: Box<dyn Executor>,
+    exprs: Vec<Expr>,
 }
 
-impl ProjectExec {
-    pub fn new(input: Box<dyn Operator>, exprs: Vec<(Expr, String)>) -> Self {
+impl ProjectExecutor {
+    pub fn new(input: Box<dyn Executor>, exprs: Vec<Expr>) -> Self {
         Self { input, exprs }
     }
 }
 
-impl Operator for ProjectExec {
-    fn open(&mut self) -> Result<(), ExecError> {
-        self.input.open()
+impl Executor for ProjectExecutor {
+    fn open(&mut self, ctx: &ExecutionContext) {
+        self.input.open(ctx);
     }
 
-    fn next(&mut self) -> Result<Option<Row>, ExecError> {
-        let row = match self.input.next()? {
-            Some(r) => r,
-            None => return Ok(None),
-        };
-        let ev = Evaluator::new(&row);
+    fn next(&mut self) -> Option<Row> {
+        let row = self.input.next()?;
 
-        let mut out = HashMap::new();
-
-        for (expr, alias) in &self.exprs {
-            let value = ev.eval_expr(expr)?.unwrap_or(Value::Null);
-            out.insert(alias.clone(), value);
+        let mut out = Vec::with_capacity(self.exprs.len());
+        for expr in &self.exprs {
+            let v = eval_expr(expr, &row);
+            out.push(v);
         }
 
-        debug_assert!(
-            out.keys().all(|k| !k.contains('.')),
-            "Project output must be unqualified"
-        );
-
-        Ok(Some(Row {
-            row_id: row.row_id,
-            values: out,
-        }))
+        Some(out)
     }
 
-    fn close(&mut self) -> Result<(), ExecError> {
-        self.input.close()
+    fn close(&mut self) {
+        self.input.close();
     }
 }

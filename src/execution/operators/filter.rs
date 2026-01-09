@@ -1,39 +1,44 @@
-use crate::exec::evaluator::{Evaluator, ExecError};
-use crate::exec::operator::{Operator, Row};
+use crate::execution::context::ExecutionContext;
+use crate::execution::eval_expr::eval_expr;
+use crate::execution::executor::{Executor, Row};
 use crate::ir::expr::Expr;
+use crate::types::value::Value;
 
-pub struct FilterExec {
-    input: Box<dyn Operator>,
+pub struct FilterExecutor {
+    input: Box<dyn Executor>,
     predicate: Expr,
 }
 
-impl FilterExec {
-    pub fn new(input: Box<dyn Operator>, predicate: Expr) -> Self {
+impl FilterExecutor {
+    pub fn new(input: Box<dyn Executor>, predicate: Expr) -> Self {
         Self { input, predicate }
     }
 }
 
-impl Operator for FilterExec {
-    fn open(&mut self) -> Result<(), ExecError> {
-        println!("FilterExec.open()");
-        self.input.open()
+impl Executor for FilterExecutor {
+    fn open(&mut self, ctx: &ExecutionContext) {
+        self.input.open(ctx);
     }
 
-    fn next(&mut self) -> Result<Option<Row>, ExecError> {
-        while let Some(row) = self.input.next()? {
-            let ev = Evaluator::new(&row);
-            let passed = ev.eval_predicate(&self.predicate)?;
-            if passed {
-                return Ok(Some(row));
-            } else {
-                continue;
+    fn next(&mut self) -> Option<Row> {
+        while let Some(row) = self.input.next() {
+            let value = eval_expr(&self.predicate, &row);
+
+            match value {
+                Value::Bool(true) => return Some(row),
+                Value::Bool(false) | Value::Null => {
+                    continue;
+                }
+                other => {
+                    panic!("Filter predicate did not evaluate to boolean: {:?}", other);
+                }
             }
         }
 
-        Ok(None)
+        None
     }
 
-    fn close(&mut self) -> Result<(), ExecError> {
-        self.input.close()
+    fn close(&mut self) {
+        self.input.close();
     }
 }

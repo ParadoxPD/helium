@@ -3,44 +3,45 @@ use crate::execution::context::ExecutionContext;
 use crate::execution::executor::{Executor, Row};
 use crate::ir::expr::Expr;
 
-pub struct DeleteExecutor {
+pub struct InsertExecutor {
     pub(crate) table_id: TableId,
-    pub(crate) predicate: Option<Expr>,
+    pub(crate) rows: Vec<Vec<Expr>>,
 
     // runtime
     done: bool,
-    pub(crate) deleted: usize,
+    pub(crate) inserted: usize,
 }
 
-impl DeleteExecutor {
-    pub fn new(table_id: TableId, predicate: Option<Expr>) -> Self {
+impl InsertExecutor {
+    pub fn new(table_id: TableId, rows: Vec<Vec<Expr>>) -> Self {
         Self {
             table_id,
-            predicate,
+            rows,
             done: false,
-            deleted: 0,
+            inserted: 0,
         }
     }
 }
 
-impl Executor for DeleteExecutor {
+impl Executor for InsertExecutor {
     fn open(&mut self, _ctx: &ExecutionContext) {
         self.done = false;
-        self.deleted = 0;
+        self.inserted = 0;
     }
 
     fn next(&mut self) -> Option<Row> {
-        // DELETE produces no rows
         if self.done {
-            None
-        } else {
-            self.done = true;
-            None
+            return None;
         }
+
+        self.done = true;
+
+        // NOTE:
+        // actual insertion happens in close()
+        None
     }
 
     fn close(&mut self) {
-        // actual deletion happens in engine
+        // No-op here; actual work is done by engine
     }
 }
-

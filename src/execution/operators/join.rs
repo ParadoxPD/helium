@@ -1,92 +1,99 @@
-use crate::exec::evaluator::{Evaluator, ExecError};
-use crate::exec::operator::{Operator, Row};
+use crate::execution::context::ExecutionContext;
+use crate::execution::eval_expr::eval_expr;
+use crate::execution::executor::{Executor, Row};
 use crate::ir::expr::Expr;
+use crate::ir::plan::JoinType;
+use crate::types::value::Value;
 
-pub struct JoinExec {
-    left: Box<dyn Operator>,
-    right: Box<dyn Operator>,
+pub struct JoinExecutor {
+    left: Box<dyn Executor>,
+    right: Box<dyn Executor>,
     on: Expr,
+    join_type: JoinType,
 
-    left_rows: Vec<Row>,
-    right_rows: Vec<Row>,
-
-    i: usize,
-    j: usize,
+    // runtime state
+    right_buffer: Vec<Row>,
+    left_row: Option<Row>,
+    right_pos: usize,
 }
 
-impl JoinExec {
-    pub fn new(left: Box<dyn Operator>, right: Box<dyn Operator>, on: Expr) -> Self {
+impl JoinExecutor {
+    pub fn new(
+        left: Box<dyn Executor>,
+        right: Box<dyn Executor>,
+        on: Expr,
+        join_type: JoinType,
+    ) -> Self {
         Self {
             left,
             right,
             on,
-            left_rows: Vec::new(),
-            right_rows: Vec::new(),
-            i: 0,
-            j: 0,
+            join_type,
+            right_buffer: Vec::new(),
+            left_row: None,
+            right_pos: 0,
         }
-    }
-
-    fn merge_rows(left: &Row, right: &Row) -> Row {
-        let mut out = left.clone();
-        for (k, v) in right.values.clone() {
-            out.values.insert(k, v);
-        }
-        out
     }
 }
 
-impl Operator for JoinExec {
-    fn open(&mut self) -> Result<(), ExecError> {
-        // Always reset state
-        self.left_rows.clear();
-        self.right_rows.clear();
-        self.i = 0;
-        self.j = 0;
+impl Executor for JoinExecutor {
+    fn open(&mut self, ctx: &ExecutionContext) {
+        self.right_buffer.clear();
+        self.left_row = None;
+        self.right_pos = 0;
 
-        self.left.open();
-        self.right.open();
-        while let Some(row) = self.left.next()? {
-            self.left_rows.push(row);
+        self.left.open(ctx);
+        self.right.open(ctx);
+
+        // Materialize RIGHT side
+        while let Some(row) = self.right.next() {
+            self.right_buffer.push(row);
         }
-
-        while let Some(row) = self.right.next()? {
-            self.right_rows.push(row);
-        }
-
-        Ok(())
     }
 
-    fn next(&mut self) -> Result<Option<Row>, ExecError> {
-        while self.i < self.left_rows.len() {
-            while self.j < self.right_rows.len() {
-                let l = &self.left_rows[self.i];
-                let r = &self.right_rows[self.j];
-                self.j += 1;
+    fn next(&mut self) -> Option<Row> {
+        loop {
+            // Fetch next left row if needed
+            if self.left_row.is_none() {
+                self.left_row = self.left.next();
+                self.right_pos = 0;
 
-                let merged = Self::merge_rows(l, r);
-                let ev = Evaluator::new(&merged);
-                println!("JOIN ROW KEYS = {:?}", merged.values.keys());
-
-                if ev.eval_predicate(&self.on)? {
-                    println!("JOIN ROW = {:?}", merged);
-
-                    return Ok(Some(merged));
+                if self.left_row.is_none() {
+                    return None; // no more rows
                 }
             }
 
-            self.j = 0;
-            self.i += 1;
-        }
+            let left = self.left_row.as_ref().unwrap();
 
-        Ok(None)
+            while self.right_pos < self.right_buffer.len() {
+                let right = &self.right_buffer[self.right_pos];
+                self.right_pos += 1;
+
+                // Combine rows
+                let mut joined = Vec::with_capacity(left.len() + right.len());
+                joined.extend_from_slice(left);
+                joined.extend_from_slice(right);
+
+                let pred = eval_expr(&self.on, &joined);
+
+                match pred {
+                    Value::Bool(true) => return Some(joined),
+                    Value::Bool(false) | Value::Null => continue,
+                    other => panic!("Join predicate did not evaluate to boolean: {:?}", other),
+                }
+            }
+
+            // Exhausted right side for this left row
+            self.left_row = None;
+        }
     }
 
-    fn close(&mut self) -> Result<(), ExecError> {
-        self.left.close()?;
-        self.right.close()?;
-        self.left_rows.clear();
-        self.right_rows.clear();
-        Ok(())
+    fn close(&mut self) {
+        self.right_buffer.clear();
+        self.left_row = None;
+        self.right_pos = 0;
+
+        self.left.close();
+        self.right.close();
     }
 }

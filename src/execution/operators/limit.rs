@@ -1,45 +1,52 @@
-use crate::exec::{
-    evaluator::ExecError,
-    operator::{Operator, Row},
-};
+use crate::execution::context::ExecutionContext;
+use crate::execution::executor::{Executor, Row};
 
-pub struct LimitExec {
-    input: Box<dyn Operator>,
-    limit: usize,
-    seen: usize,
+pub struct LimitExecutor {
+    input: Box<dyn Executor>,
+    limit: u64,
+    offset: u64,
+    seen: u64,
+    produced: u64,
 }
 
-impl LimitExec {
-    pub fn new(input: Box<dyn Operator>, limit: usize) -> Self {
+impl LimitExecutor {
+    pub fn new(input: Box<dyn Executor>, limit: u64, offset: u64) -> Self {
         Self {
             input,
             limit,
+            offset,
             seen: 0,
+            produced: 0,
         }
     }
 }
 
-impl Operator for LimitExec {
-    fn open(&mut self) -> Result<(), ExecError> {
+impl Executor for LimitExecutor {
+    fn open(&mut self, ctx: &ExecutionContext) {
         self.seen = 0;
-        self.input.open()
+        self.produced = 0;
+        self.input.open(ctx);
     }
 
-    fn next(&mut self) -> Result<Option<Row>, ExecError> {
-        if self.limit == 0 || self.seen >= self.limit {
-            return Ok(None);
+    fn next(&mut self) -> Option<Row> {
+        if self.produced >= self.limit {
+            return None;
         }
 
-        match self.input.next()? {
-            Some(row) => {
+        while let Some(row) = self.input.next() {
+            if self.seen < self.offset {
                 self.seen += 1;
-                Ok(Some(row))
+                continue;
             }
-            None => Ok(None),
+
+            self.produced += 1;
+            return Some(row);
         }
+
+        None
     }
 
-    fn close(&mut self) -> Result<(), ExecError> {
-        self.input.close()
+    fn close(&mut self) {
+        self.input.close();
     }
 }

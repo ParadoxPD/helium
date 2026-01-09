@@ -1,63 +1,52 @@
-use std::{collections::HashMap, sync::Arc};
+use crate::catalog::ids::{ColumnId, TableId};
+use crate::execution::context::ExecutionContext;
+use crate::execution::executor::{Executor, Row};
+use crate::ir::expr::Expr;
 
-use crate::{
-    common::{schema::Column, value::Value},
-    exec::{
-        evaluator::{Evaluator, ExecError},
-        operator::{Operator, Row},
-    },
-    ir::expr::Expr,
-    storage::table::HeapTable,
-};
+pub struct UpdateExecutor {
+    pub(crate) table_id: TableId,
+    pub(crate) assignments: Vec<(ColumnId, Expr)>,
+    pub(crate) predicate: Option<Expr>,
 
-pub struct UpdateExec {
-    input: Box<dyn Operator>,
-    table: Arc<HeapTable>,
-    assignments: Vec<(Column, Expr)>,
+    // runtime
+    done: bool,
+    pub(crate) updated: usize,
 }
 
-impl Operator for UpdateExec {
-    fn open(&mut self) -> Result<(), ExecError> {
-        self.input.open()
-    }
-
-    fn next(&mut self) -> Result<Option<Row>, ExecError> {
-        let row = match self.input.next()? {
-            Some(r) => r,
-            None => return Ok(None),
-        }; // execution Row (qualified keys)
-        let ev = Evaluator::new(&row);
-
-        // 1. Start from existing fully-qualified values
-        let mut updated = row.values.clone();
-
-        // 2. Apply assignments USING fully-qualified keys
-        for (col, expr) in &self.assignments {
-            let v = ev.eval_expr(expr)?.unwrap_or(Value::Null);
-
-            let fq = format!("{}.{}", self.table.name, col.name);
-            updated.insert(fq, v);
+impl UpdateExecutor {
+    pub fn new(
+        table_id: TableId,
+        assignments: Vec<(ColumnId, Expr)>,
+        predicate: Option<Expr>,
+    ) -> Self {
+        Self {
+            table_id,
+            assignments,
+            predicate,
+            done: false,
+            updated: 0,
         }
-
-        // 3. Convert HashMap -> Vec<Value> in schema order (fully-qualified ONLY)
-        let mut values = Vec::with_capacity(self.table.schema().columns.len());
-
-        for col in &self.table.schema().columns {
-            let fq = format!("{}.{}", self.table.name, col.name);
-            values.push(updated.get(&fq).cloned().unwrap_or(Value::Null));
-        }
-
-        // 4. Copy-on-write: insert new row, delete old
-        let new_rid = self.table.insert(values);
-        self.table.delete(row.row_id);
-
-        // 5. Emit execution Row (projection rebuilds values)
-        Ok(Some(Row {
-            row_id: new_rid,
-            values: HashMap::new(),
-        }))
-    }
-    fn close(&mut self) -> Result<(), ExecError> {
-        self.input.close()
     }
 }
+
+impl Executor for UpdateExecutor {
+    fn open(&mut self, _ctx: &ExecutionContext) {
+        self.done = false;
+        self.updated = 0;
+    }
+
+    fn next(&mut self) -> Option<Row> {
+        // UPDATE produces no rows
+        if self.done {
+            None
+        } else {
+            self.done = true;
+            None
+        }
+    }
+
+    fn close(&mut self) {
+        // actual update happens in engine
+    }
+}
+

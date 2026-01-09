@@ -59,7 +59,6 @@ impl std::fmt::Display for Value {
             Value::Null => write!(f, "NULL"),
             Value::Int64(v) => write!(f, "{v}"),
             Value::Float64(v) => write!(f, "{v}"),
-            Value::Bool(v) => write!(f, "{v}"),
             Value::String(v) => write!(f, "{v}"),
             _ => write!(f, "<value>"),
         }

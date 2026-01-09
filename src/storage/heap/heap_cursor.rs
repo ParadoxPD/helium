@@ -1,5 +1,6 @@
 use crate::storage::{
-    heap::heap_table::HeapTable, heap::storage_row::StorageRow, page::row_id::RowId,
+    heap::heap_table::HeapTable,
+    page::{page_id::PageId, row::StorageRow, row_id::RowId, row_page::RowPage},
 };
 
 pub struct HeapCursor<'a> {
@@ -36,12 +37,18 @@ impl<'a> Iterator for HeapCursor<'a> {
             let page = RowPage::from_bytes(pid, &frame.data);
             bp.unpin_page(pid, false);
 
-            while self.slot_idx < page.capacity() as u16 {
-                let slot = self.slot_idx;
+            while (self.slot_idx as usize) < page.slots_len() {
+                let slot_id = self.slot_idx;
                 self.slot_idx += 1;
 
-                if let Some(row) = page.get(slot) {
-                    return Some((RowId { page_id: pid, slot }, row.clone()));
+                if let Some(row) = page.get(slot_id) {
+                    return Some((
+                        RowId {
+                            page_id: pid,
+                            slot_id,
+                        },
+                        row.clone(),
+                    ));
                 }
             }
 
@@ -50,3 +57,4 @@ impl<'a> Iterator for HeapCursor<'a> {
         }
     }
 }
+

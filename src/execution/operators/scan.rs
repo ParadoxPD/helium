@@ -6,7 +6,7 @@ use crate::{
         context::ExecutionContext,
         executor::{Executor, Row},
     },
-    storage::heap::table::{HeapCursor, HeapTable},
+    storage::heap::{heap_cursor::HeapCursor, heap_table::HeapTable},
 };
 
 pub struct ScanExecutor {

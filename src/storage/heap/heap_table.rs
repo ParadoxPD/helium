@@ -3,17 +3,16 @@ use std::sync::{Arc, Mutex};
 use crate::{
     storage::{
         buffer::pool::BufferPoolHandle,
-        heap::storage_row::StorageRow,
-        page::row_page::RowPage, // keep your existing RowPage
-        page::{PageId, row_id::RowId},
+        heap::heap_cursor::HeapCursor,
+        page::{page_id::PageId, row::StorageRow, row_id::RowId, row_page::RowPage}, // keep your existing RowPage
     },
     types::value::Value,
 };
 
 pub struct HeapTable {
-    pages: Mutex<Vec<PageId>>,
+    pub(crate) pages: Mutex<Vec<PageId>>,
     page_capacity: usize,
-    bp: BufferPoolHandle,
+    pub(crate) bp: BufferPoolHandle,
 }
 
 impl HeapTable {
@@ -78,7 +77,7 @@ impl HeapTable {
         let frame = bp.fetch_page(rid.page_id);
         let mut page = RowPage::from_bytes(rid.page_id, &frame.data);
 
-        let ok = page.delete(rid.slot);
+        let ok = page.delete(rid.slot_id);
         assert!(ok, "invalid RowId");
 
         page.write_bytes(&mut frame.data);
@@ -90,13 +89,14 @@ impl HeapTable {
         let frame = bp.fetch_page(rid.page_id);
         let page = RowPage::from_bytes(rid.page_id, &frame.data);
 
-        let row = page.get(rid.slot).expect("invalid RowId").clone();
+        let row = page.get(rid.slot_id).expect("invalid RowId").clone();
 
         bp.unpin_page(rid.page_id, false);
         row
     }
 
-    pub fn scan(&self) -> HeapCursor {
+    pub fn scan(&self) -> HeapCursor<'_> {
         HeapCursor::new(self)
     }
 }
+

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::catalog::errors::CatalogError;
 use crate::catalog::ids::*;
-use crate::catalog::index::IndexMeta;
+use crate::catalog::index::{IndexEntry, IndexMeta};
 use crate::catalog::table::TableMeta;
 
 pub struct Catalog {
@@ -13,7 +13,7 @@ pub struct Catalog {
     tables_by_id: HashMap<TableId, TableMeta>,
     tables_by_name: HashMap<String, TableId>,
 
-    indexes_by_id: HashMap<IndexId, IndexMeta>,
+    indexes_by_id: HashMap<IndexId, IndexEntry>,
     indexes_by_name: HashMap<String, IndexId>,
 }
 

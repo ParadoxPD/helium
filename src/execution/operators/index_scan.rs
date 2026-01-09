@@ -1,24 +1,29 @@
-use crate::catalog::ids::{IndexId, TableId};
-use crate::execution::context::ExecutionContext;
+use std::sync::{Arc, Mutex};
+
 use crate::execution::executor::{Executor, Row};
 use crate::ir::index_predicate::IndexPredicate;
-use crate::storage::page::RowId;
+use crate::storage::heap::heap_table::HeapTable;
+use crate::storage::index::index::Index;
+use crate::storage::page::row_id::RowId;
 
 pub struct IndexScanExecutor {
-    table_id: TableId,
-    index_id: IndexId,
+    index: Arc<Mutex<dyn Index>>,
+    heap: Arc<HeapTable>,
     predicate: IndexPredicate,
 
-    // runtime state
     rids: Vec<RowId>,
     pos: usize,
 }
 
 impl IndexScanExecutor {
-    pub fn new(table_id: TableId, index_id: IndexId, predicate: IndexPredicate) -> Self {
+    pub fn new(
+        index: Arc<Mutex<dyn Index>>,
+        heap: Arc<HeapTable>,
+        predicate: IndexPredicate,
+    ) -> Self {
         Self {
-            table_id,
-            index_id,
+            index,
+            heap,
             predicate,
             rids: Vec::new(),
             pos: 0,
@@ -27,29 +32,14 @@ impl IndexScanExecutor {
 }
 
 impl Executor for IndexScanExecutor {
-    fn open(&mut self, ctx: &ExecutionContext) {
-        self.rids.clear();
+    fn open(&mut self) {
         self.pos = 0;
+        let idx = self.index.lock().unwrap();
 
-        let index = ctx
-            .catalog
-            .get_index_by_id(self.index_id)
-            .expect("index must exist");
-
-        let index_handle = index.handle(); // adapt to your API
-
-        match &self.predicate {
-            IndexPredicate::Eq(v) => {
-                let key = index_handle.make_key(v);
-                self.rids = index_handle.get(&key);
-            }
-
-            IndexPredicate::Range { low, high } => {
-                let low_k = index_handle.make_key(low);
-                let high_k = index_handle.make_key(high);
-                self.rids = index_handle.range(&low_k, &high_k);
-            }
-        }
+        self.rids = match &self.predicate {
+            IndexPredicate::Eq(v) => idx.get(v),
+            IndexPredicate::Range { low, high } => idx.range(low, high),
+        };
     }
 
     fn next(&mut self) -> Option<Row> {
@@ -60,16 +50,8 @@ impl Executor for IndexScanExecutor {
         let rid = self.rids[self.pos];
         self.pos += 1;
 
-        let table = ctx
-            .catalog
-            .get_table_by_id(self.table_id)
-            .expect("table must exist");
+        let storage_row = self.heap.fetch(rid);
 
-        let heap = table.heap();
-        let storage_row = heap.fetch(rid);
-
-        // IMPORTANT:
-        // storage_row.values is Vec<Value> in schema order
         Some(storage_row.values.clone())
     }
 
@@ -78,4 +60,3 @@ impl Executor for IndexScanExecutor {
         self.pos = 0;
     }
 }
-

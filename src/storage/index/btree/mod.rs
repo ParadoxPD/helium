@@ -1,6 +1,17 @@
 pub mod cursor;
 pub mod disk;
-pub mod index;
-pub mod internal;
-pub mod leaf;
+pub mod index_impl;
+pub mod key;
 pub mod node;
+
+use crate::storage::index::btree::disk::BPlusTree;
+
+pub struct BTreeIndex {
+    tree: BPlusTree,
+}
+
+impl BTreeIndex {
+    pub fn new(tree: BPlusTree) -> Self {
+        Self { tree }
+    }
+}

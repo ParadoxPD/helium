@@ -1,4 +1,4 @@
-use crate::storage::page::PageId;
+use crate::storage::page::page_id::PageId;
 
 #[derive(Debug)]
 pub struct BufferFrame {

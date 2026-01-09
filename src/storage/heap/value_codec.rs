@@ -14,7 +14,7 @@ impl ValueCodec {
                 buf.push(2);
                 buf.extend_from_slice(&v.to_le_bytes());
             }
-            Value::Bool(v) => {
+            Value::Boolean(v) => {
                 buf.push(3);
                 buf.push(if *v { 1 } else { 0 });
             }
@@ -25,6 +25,11 @@ impl ValueCodec {
                 buf.extend_from_slice(&len.to_le_bytes());
                 buf.extend_from_slice(bytes);
             }
+            Value::Int32(_) => todo!(),
+            Value::Float32(_) => todo!(),
+            Value::Blob(items) => todo!(),
+            Value::Date(_) => todo!(),
+            Value::Timestamp(_) => todo!(),
         }
     }
 
@@ -47,7 +52,7 @@ impl ValueCodec {
             3 => {
                 let v = buf[0] != 0;
                 *buf = &buf[1..];
-                Value::Bool(v)
+                Value::Boolean(v)
             }
             4 => {
                 let (len_bytes, rest) = buf.split_at(4);

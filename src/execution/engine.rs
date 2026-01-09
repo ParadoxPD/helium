@@ -12,6 +12,7 @@ use crate::execution::operators::scan::ScanExecutor;
 use crate::execution::operators::sort::SortExecutor;
 use crate::execution::operators::update::UpdateExecutor;
 use crate::ir::plan::LogicalPlan;
+use crate::storage::page::page::RowId;
 use crate::types::value::Value;
 
 pub enum ExecutionResult {
@@ -51,12 +52,27 @@ pub fn execute_plan(plan: LogicalPlan, ctx: &ExecutionContext) -> ExecutionResul
             exec.close();
             ExecutionResult::Affected(count)
         }
-
         LogicalPlan::IndexScan {
             table_id,
             index_id,
             predicate,
-        } => Box::new(IndexScanExecutor::new(table_id, index_id, predicate)),
+        } => {
+            let table = ctx
+                .catalog
+                .get_table_by_id(*table_id)
+                .expect("table must exist");
+
+            let index_entry = ctx
+                .catalog
+                .get_index_by_id(*index_id)
+                .expect("index must exist");
+
+            Box::new(IndexScanExecutor::new(
+                table.heap(),
+                index_entry.index.clone(),
+                predicate.clone(),
+            ))
+        }
 
         _ => {
             let mut root = build_executor(plan, ctx);
@@ -128,22 +144,25 @@ pub fn build_executor(plan: LogicalPlan, ctx: &ExecutionContext) -> Box<dyn Exec
 }
 
 pub fn execute_insert(exec: &mut InsertExecutor, ctx: &ExecutionContext) -> usize {
-    let table = ctx
-        .catalog
-        .get_table_by_id(exec.table_id)
-        .expect("table must exist");
-
-    let heap = table.heap(); // adapt to your API
+    let table = ctx.catalog.get_table_by_id(exec.table_id).unwrap();
+    let heap = table.heap();
 
     for row_exprs in &exec.rows {
         let mut values = Vec::with_capacity(row_exprs.len());
 
         for expr in row_exprs {
-            let v = eval_expr(expr, &[]);
-            values.push(v);
+            values.push(eval_expr(expr, &[]));
         }
 
-        heap.insert(values);
+        let rid = heap.insert(values.clone());
+
+        for index_entry in ctx.catalog.indexes_for_table(exec.table_id) {
+            let col_id = index_entry.meta.column_ids[0];
+            let key = &values[col_id.0 as usize];
+
+            index_entry.index.lock().unwrap().insert(key, rid);
+        }
+
         exec.inserted += 1;
     }
 
@@ -151,33 +170,34 @@ pub fn execute_insert(exec: &mut InsertExecutor, ctx: &ExecutionContext) -> usiz
 }
 
 pub fn execute_delete(exec: &mut DeleteExecutor, ctx: &ExecutionContext) -> usize {
-    let table = ctx
-        .catalog
-        .get_table_by_id(exec.table_id)
-        .expect("table must exist");
-
-    let heap = table.heap(); // adapt to your storage API
+    let table = ctx.catalog.get_table_by_id(exec.table_id).unwrap();
+    let heap = table.heap();
     let mut cursor = heap.scan();
 
-    let mut to_delete = Vec::new();
+    let mut to_delete: Vec<(RowId, Vec<Value>)> = Vec::new();
 
-    while let Some((row_id, storage_row)) = cursor.next() {
-        let row = storage_row.values.clone(); // Vec<Value>
+    while let Some((rid, storage_row)) = cursor.next() {
+        let row = storage_row.values.clone();
 
         if let Some(pred) = &exec.predicate {
-            let v = eval_expr(pred, &row);
-
-            match v {
+            match eval_expr(pred, &row) {
                 Value::Bool(true) => {}
                 Value::Bool(false) | Value::Null => continue,
-                other => panic!("DELETE predicate did not evaluate to boolean: {:?}", other),
+                _ => panic!("DELETE predicate not boolean"),
             }
         }
 
-        to_delete.push(row_id);
+        to_delete.push((rid, row));
     }
 
-    for rid in to_delete {
+    for (rid, old_row) in to_delete {
+        for index_entry in ctx.catalog.indexes_for_table(exec.table_id) {
+            let col_id = index_entry.meta.column_ids[0];
+            let key = &old_row[col_id.0 as usize];
+
+            index_entry.index.lock().unwrap().delete(key, rid);
+        }
+
         heap.delete(rid);
         exec.deleted += 1;
     }
@@ -186,47 +206,45 @@ pub fn execute_delete(exec: &mut DeleteExecutor, ctx: &ExecutionContext) -> usiz
 }
 
 pub fn execute_update(exec: &mut UpdateExecutor, ctx: &ExecutionContext) -> usize {
-    let table = ctx
-        .catalog
-        .get_table_by_id(exec.table_id)
-        .expect("table must exist");
-
-    let heap = table.heap(); // adapt to your storage API
+    let table = ctx.catalog.get_table_by_id(exec.table_id).unwrap();
+    let heap = table.heap();
     let mut cursor = heap.scan();
 
-    // Collect updates first (avoid iterator invalidation)
-    let mut updates: Vec<(/*row_id*/ _, /*new_values*/ Vec<Value>)> = Vec::new();
+    let mut updates = Vec::new();
 
-    while let Some((row_id, storage_row)) = cursor.next() {
-        let old_row: Vec<Value> = storage_row.values.clone();
+    while let Some((rid, storage_row)) = cursor.next() {
+        let old_row = storage_row.values.clone();
 
-        // Predicate check (SQL semantics)
         if let Some(pred) = &exec.predicate {
-            let v = eval_expr(pred, &old_row);
-            match v {
+            match eval_expr(pred, &old_row) {
                 Value::Bool(true) => {}
                 Value::Bool(false) | Value::Null => continue,
-                other => panic!("UPDATE predicate did not evaluate to boolean: {:?}", other),
+                _ => panic!("UPDATE predicate not boolean"),
             }
         }
 
-        // Start from old row and apply assignments
         let mut new_row = old_row.clone();
         for (col_id, expr) in &exec.assignments {
-            let v = eval_expr(expr, &old_row);
-            let idx = col_id.0 as usize;
-            new_row[idx] = v;
+            new_row[col_id.0 as usize] = eval_expr(expr, &old_row);
         }
 
-        updates.push((row_id, new_row));
+        updates.push((rid, old_row, new_row));
     }
 
-    // Apply updates
-    for (row_id, new_values) in updates {
-        // Phase 1 semantics: delete + insert
-        // Phase 3 (MVCC): replace with versioned update
-        heap.delete(row_id);
-        heap.insert(new_values);
+    for (rid, old_row, new_row) in updates {
+        for index_entry in ctx.catalog.indexes_for_table(exec.table_id) {
+            let col_id = index_entry.meta.column_ids[0];
+
+            let old_key = &old_row[col_id.0 as usize];
+            let new_key = &new_row[col_id.0 as usize];
+
+            let mut idx = index_entry.index.lock().unwrap();
+            idx.delete(old_key, rid);
+            idx.insert(new_key, rid);
+        }
+
+        heap.delete(rid);
+        heap.insert(new_row);
         exec.updated += 1;
     }
 

@@ -1,96 +1,121 @@
+use crate::storage::heap::value_codec::ValueCodec;
+use crate::storage::index::btree::key::IndexKey;
+use crate::storage::page::page_id::PageId;
+use crate::storage::page::row_id::RowId;
+use crate::types::value::Value;
 
-use crate::{
-    common::value::Value,
-    storage::{
-        btree::{
-            internal::{DiskInternalNode, InternalNode},
-            leaf::{DiskLeafNode, LeafNode},
-        },
-        page::{PageId, RowId},
+pub enum BTreeNode {
+    Internal {
+        keys: Vec<IndexKey>,
+        children: Vec<PageId>, // page ids
     },
-};
-
-pub trait Index: Send + Sync {
-    fn insert(&mut self, key: IndexKey, rid: RowId);
-    fn delete(&mut self, key: &IndexKey, rid: RowId);
-    fn get(&self, key: &IndexKey) -> Vec<RowId>;
-    fn range(&self, from: &IndexKey, to: &IndexKey) -> Vec<RowId>;
+    Leaf {
+        keys: Vec<IndexKey>,
+        values: Vec<Vec<RowId>>, // one-to-many
+        next: Option<PageId>,
+    },
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum IndexKey {
-    Int64(i64),
-    String(String),
-}
+impl BTreeNode {
+    pub fn write_bytes(&self, buf: &mut [u8]) {
+        buf.fill(0);
+        let mut out = Vec::new();
 
-impl IndexKey {
-    pub fn serialize(&self, buf: &mut Vec<u8>) {
         match self {
-            IndexKey::Int64(v) => {
-                buf.push(1);
-                buf.extend_from_slice(&v.to_le_bytes());
+            BTreeNode::Leaf { keys, values, next } => {
+                out.push(0);
+                out.extend_from_slice(&(keys.len() as u16).to_le_bytes());
+                out.extend_from_slice(&0u16.to_le_bytes());
+                out.extend_from_slice(&next.unwrap_or(PageId(0)).0.to_le_bytes());
+
+                for k in keys {
+                    IndexKey::serialize(k, &mut out);
+                }
+
+                for list in values {
+                    out.extend_from_slice(&(list.len() as u16).to_le_bytes());
+                    for rid in list {
+                        out.extend_from_slice(&rid.page_id.0.to_le_bytes());
+                        out.extend_from_slice(&rid.slot_id.to_le_bytes());
+                    }
+                }
             }
 
-            IndexKey::String(s) => {
-                buf.push(2);
-                let bytes = s.as_bytes();
-                let len = bytes.len() as u16;
-                buf.extend_from_slice(&len.to_le_bytes());
-                buf.extend_from_slice(bytes);
+            BTreeNode::Internal { keys, children } => {
+                out.push(1);
+                out.extend_from_slice(&(keys.len() as u16).to_le_bytes());
+                out.extend_from_slice(&0u16.to_le_bytes());
+                out.extend_from_slice(&0u64.to_le_bytes());
+
+                for k in keys {
+                    k.serialize(&mut out);
+                }
+
+                for c in children {
+                    out.extend_from_slice(&c.0.to_le_bytes());
+                }
             }
         }
+
+        buf[..out.len()].copy_from_slice(&out);
     }
 
-    pub fn deserialize(buf: &mut &[u8]) -> Self {
-        assert!(!buf.is_empty(), "buffer underflow in IndexKey::deserialize");
+    pub fn from_bytes(buf: &[u8]) -> Self {
+        let mut input = buf;
 
-        let tag = buf[0];
-        *buf = &buf[1..];
+        let node_type = input[0];
+        input = &input[1..];
 
-        match tag {
+        let key_count = u16::from_le_bytes(input[..2].try_into().unwrap()) as usize;
+        input = &input[4..]; // skip key_count + reserved
+
+        let next = u64::from_le_bytes(input[..8].try_into().unwrap());
+        input = &input[8..];
+
+        let mut keys = Vec::with_capacity(key_count);
+        for _ in 0..key_count {
+            keys.push(IndexKey::deserialize(&mut input));
+        }
+
+        match node_type {
+            0 => {
+                let mut values = Vec::with_capacity(key_count);
+                for _ in 0..key_count {
+                    let cnt = u16::from_le_bytes(input[..2].try_into().unwrap()) as usize;
+                    input = &input[2..];
+                    let mut list = Vec::with_capacity(cnt);
+                    for _ in 0..cnt {
+                        let pid = u64::from_le_bytes(input[..8].try_into().unwrap());
+                        let sid = u16::from_le_bytes(input[8..10].try_into().unwrap());
+                        input = &input[10..];
+                        list.push(RowId {
+                            page_id: PageId(pid),
+                            slot_id: sid,
+                        });
+                    }
+                    values.push(list);
+                }
+
+                BTreeNode::Leaf {
+                    keys,
+                    values,
+                    next: if next == 0 { None } else { Some(PageId(next)) },
+                }
+            }
+
             1 => {
-                let (num, rest) = buf.split_at(8);
-                *buf = rest;
-                IndexKey::Int64(i64::from_le_bytes(num.try_into().unwrap()))
+                let mut children = Vec::with_capacity(key_count + 1);
+                for _ in 0..key_count + 1 {
+                    let pid = u64::from_le_bytes(input[..8].try_into().unwrap());
+                    input = &input[8..];
+                    children.push(PageId(pid));
+                }
+
+                BTreeNode::Internal { keys, children }
             }
 
-            2 => {
-                let (len_bytes, rest) = buf.split_at(2);
-                let len = u16::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
-
-                let (str_bytes, rest2) = rest.split_at(len);
-                *buf = rest2;
-
-                let s = String::from_utf8(str_bytes.to_vec()).expect("invalid UTF-8 in IndexKey");
-                IndexKey::String(s)
-            }
-
-            _ => panic!("unknown IndexKey tag {}", tag),
+            _ => panic!("invalid B+Tree node type"),
         }
     }
 }
 
-impl TryFrom<&Value> for IndexKey {
-    type Error = ();
-
-    fn try_from(v: &Value) -> Result<Self, ()> {
-        match v {
-            Value::Int64(i) => Ok(IndexKey::Int64(*i)),
-            Value::String(s) => Ok(IndexKey::String(s.clone())),
-            _ => Err(()),
-        }
-    }
-}
-
-pub type NodeId = PageId;
-
-#[derive(Clone)]
-pub enum BPlusNode {
-    Internal(InternalNode),
-    Leaf(LeafNode),
-}
-#[derive(Clone)]
-pub enum DiskBPlusNode {
-    Internal(DiskInternalNode),
-    Leaf(DiskLeafNode),
-}

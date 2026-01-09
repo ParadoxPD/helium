@@ -1,19 +1,15 @@
-use crate::buffer::frame::{PAGE_SIZE, PageFrame};
-use crate::storage::page::PageId;
-use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    path::PathBuf,
+};
 
-pub trait PageManager: Send + Sync {
-    fn allocate_page(&mut self) -> PageId;
-    fn fetch_page(&mut self, id: PageId) -> &mut PageFrame;
-    fn flush_page(&mut self, id: PageId);
-    fn flush_all(&mut self);
-}
-
-pub type PageManagerHandle = Arc<Mutex<dyn PageManager>>;
+use crate::storage::{
+    buffer::frame::PAGE_SIZE,
+    page::page_id::PageId,
+    pagemgr::{frame::PageFrame, manager::PageManager},
+};
 
 #[derive(Debug)]
 pub struct FilePageManager {

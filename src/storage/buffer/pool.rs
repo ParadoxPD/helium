@@ -3,9 +3,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{
+use crate::storage::{
     buffer::frame::{BufferFrame, PageFrame},
-    storage::{page::PageId, page_manager::PageManager},
+    page::page_id::PageId,
+    pagemgr::manager::PageManager,
 };
 
 pub type BufferPoolHandle = Arc<Mutex<BufferPool>>;
@@ -25,7 +26,15 @@ impl BufferPool {
 
     pub fn fetch_page(&mut self, pid: PageId) -> &mut PageFrame {
         let frame = self.frames.entry(pid).or_insert_with(|| {
-            let page = self.pm.fetch_page(pid).clone();
+            let page = {
+                let pm_page = self.pm.fetch_page(pid);
+                PageFrame {
+                    id: pm_page.id,
+                    data: pm_page.data,
+                    dirty: false,
+                }
+            };
+
             BufferFrame { page, pin_count: 0 }
         });
 
@@ -47,10 +56,8 @@ impl BufferPool {
     pub fn flush_all(&mut self) {
         for frame in self.frames.values_mut() {
             if frame.page.dirty {
-                self.pm
-                    .fetch_page(frame.page.id)
-                    .data
-                    .copy_from_slice(&frame.page.data);
+                let pm_page = self.pm.fetch_page(frame.page.id);
+                pm_page.data.copy_from_slice(&frame.page.data);
                 self.pm.flush_page(frame.page.id);
                 frame.page.dirty = false;
             }

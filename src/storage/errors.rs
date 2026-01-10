@@ -1,5 +1,7 @@
 use std::fmt;
 
+pub type StorageResult<T> = Result<T, StorageError>;
+
 #[derive(Debug)]
 pub enum StorageError {
     PageNotFound { page_id: u64 },
@@ -10,7 +12,11 @@ pub enum StorageError {
 
     CorruptedPage { page_id: u64, reason: String },
 
+    IndexCorrupted { page_id: u64, reason: String },
+
     IndexViolation { index_name: String, reason: String },
+
+    IndexInvariantViolation { reason: String },
 
     Io { message: String },
 }
@@ -21,7 +27,6 @@ impl fmt::Display for StorageError {
             StorageError::PageNotFound { page_id } => {
                 write!(f, "storage error: page {} not found", page_id)
             }
-
             StorageError::InvalidRowId { page_id, slot_id } => {
                 write!(
                     f,
@@ -29,15 +34,12 @@ impl fmt::Display for StorageError {
                     page_id, slot_id
                 )
             }
-
             StorageError::PageFull { page_id } => {
                 write!(f, "storage error: page {} is full", page_id)
             }
-
             StorageError::CorruptedPage { page_id, reason } => {
                 write!(f, "storage error: corrupted page {} ({})", page_id, reason)
             }
-
             StorageError::IndexViolation { index_name, reason } => {
                 write!(
                     f,
@@ -45,10 +47,11 @@ impl fmt::Display for StorageError {
                     index_name, reason
                 )
             }
-
             StorageError::Io { message } => {
                 write!(f, "storage IO error: {}", message)
             }
+            StorageError::IndexCorrupted { page_id, reason } => todo!(),
+            StorageError::IndexInvariantViolation { reason } => todo!(),
         }
     }
 }

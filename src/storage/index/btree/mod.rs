@@ -1,4 +1,3 @@
-pub mod cursor;
 pub mod disk;
 pub mod index_impl;
 pub mod key;

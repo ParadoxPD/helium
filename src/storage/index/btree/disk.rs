@@ -1,5 +1,6 @@
 use crate::storage::{
     buffer::{frame::PageFrame, pool::BufferPoolHandle},
+    errors::{StorageError, StorageResult},
     index::btree::{key::IndexKey, node::BTreeNode},
     page::{page_id::PageId, row_id::RowId},
 };
@@ -11,8 +12,12 @@ pub struct BPlusTree {
 }
 
 impl BPlusTree {
-    pub fn new(order: usize, bp: BufferPoolHandle) -> Self {
-        assert!(order >= 3, "B+Tree order must be ≥ 3");
+    pub fn new(order: usize, bp: BufferPoolHandle) -> StorageResult<Self> {
+        if order < 3 {
+            return Err(StorageError::IndexInvariantViolation {
+                reason: "B+Tree order must be >= 3".into(),
+            });
+        }
 
         // Allocate root page
         let root_pid = {
@@ -26,22 +31,22 @@ impl BPlusTree {
                 next: None,
             };
 
-            let page = pool.fetch_page(pid);
-            Self::serialize_node(&root, page);
+            let page = pool.fetch_page(pid)?;
+            Self::serialize_node(&root, page)?;
             pool.unpin_page(pid, true);
 
             pid
         };
 
-        Self {
+        Ok(Self {
             root: root_pid,
             order,
             bp,
-        }
+        })
     }
 
     // Serialize node to page
-    fn serialize_node(node: &BTreeNode, page: &mut PageFrame) {
+    fn serialize_node(node: &BTreeNode, page: &mut PageFrame) -> StorageResult<()> {
         let data = &mut page.data;
         data.fill(0);
 
@@ -80,23 +85,46 @@ impl BPlusTree {
             }
         }
 
-        assert!(out.len() <= data.len());
+        if out.len() > data.len() {
+            return Err(StorageError::IndexCorrupted {
+                page_id: page.id.0,
+                reason: "node serialization overflow".into(),
+            });
+        }
+
         data[..out.len()].copy_from_slice(&out);
+        Ok(())
     }
 
     // Deserialize node from page
-    fn deserialize_node(page: &PageFrame) -> BTreeNode {
+    fn deserialize_node(page: &PageFrame) -> StorageResult<BTreeNode> {
         let mut input = &page.data[..];
 
         let tag = input[0];
         input = &input[1..];
 
-        let key_count = u16::from_le_bytes(input[..2].try_into().unwrap()) as usize;
+        let key_count = u16::from_le_bytes(
+            input
+                .get(..2)
+                .ok_or(StorageError::IndexCorrupted {
+                    page_id: page.id.0,
+                    reason: "unexpected EOF reading key_count".into(),
+                })?
+                .try_into()
+                .unwrap(),
+        ) as usize;
         input = &input[2..];
 
         match tag {
             0 => {
-                let next_raw = u64::from_le_bytes(input[..8].try_into().unwrap());
+                let next_raw = {
+                    let raw = input.get(..8).ok_or(StorageError::IndexCorrupted {
+                        page_id: page.id.0,
+                        reason: "unexpected EOF reading next".into(),
+                    })?;
+                    input = &input[8..];
+                    u64::from_le_bytes(raw.try_into().unwrap())
+                };
                 input = &input[8..];
 
                 let next = if next_raw == u64::MAX {
@@ -109,14 +137,44 @@ impl BPlusTree {
                 let mut values = Vec::with_capacity(key_count);
 
                 for _ in 0..key_count {
-                    let key = IndexKey::deserialize(&mut input);
-                    let rid_count = u16::from_le_bytes(input[..2].try_into().unwrap()) as usize;
+                    let key = IndexKey::deserialize(&mut input, page.id.0)?;
+
+                    let rid_count = u16::from_le_bytes(
+                        input
+                            .get(..2)
+                            .ok_or(StorageError::IndexCorrupted {
+                                page_id: page.id.0,
+                                reason: "unexpected EOF reading rid_count".into(),
+                            })?
+                            .try_into()
+                            .unwrap(),
+                    ) as usize;
                     input = &input[2..];
 
                     let mut rids = Vec::with_capacity(rid_count);
                     for _ in 0..rid_count {
-                        let pid = u64::from_le_bytes(input[..8].try_into().unwrap());
-                        let sid = u16::from_le_bytes(input[8..10].try_into().unwrap());
+                        let pid = u64::from_le_bytes(
+                            input
+                                .get(..8)
+                                .ok_or(StorageError::IndexCorrupted {
+                                    page_id: page.id.0,
+                                    reason: "unexpected EOF reading RowId.page_id".into(),
+                                })?
+                                .try_into()
+                                .unwrap(),
+                        );
+
+                        let sid = u16::from_le_bytes(
+                            input
+                                .get(8..10)
+                                .ok_or(StorageError::IndexCorrupted {
+                                    page_id: page.id.0,
+                                    reason: "unexpected EOF reading RowId.slot_id".into(),
+                                })?
+                                .try_into()
+                                .unwrap(),
+                        );
+
                         input = &input[10..];
 
                         rids.push(RowId {
@@ -129,40 +187,58 @@ impl BPlusTree {
                     values.push(rids);
                 }
 
-                BTreeNode::Leaf { keys, values, next }
+                Ok(BTreeNode::Leaf { keys, values, next })
             }
 
             1 => {
                 let mut children = Vec::with_capacity(key_count + 1);
                 for _ in 0..key_count + 1 {
-                    let pid = u64::from_le_bytes(input[..8].try_into().unwrap());
+                    let pid = u64::from_le_bytes(
+                        input
+                            .get(..8)
+                            .ok_or(StorageError::IndexCorrupted {
+                                page_id: page.id.0,
+                                reason: "unexpected EOF reading RowId.page_id".into(),
+                            })?
+                            .try_into()
+                            .unwrap(),
+                    );
+
                     input = &input[8..];
                     children.push(PageId(pid));
                 }
 
                 let mut keys = Vec::with_capacity(key_count);
                 for _ in 0..key_count {
-                    keys.push(IndexKey::deserialize(&mut input));
+                    keys.push(IndexKey::deserialize(&mut input, page.id.0)?);
                 }
 
-                BTreeNode::Internal { keys, children }
+                Ok(BTreeNode::Internal { keys, children })
             }
 
-            _ => panic!("invalid B+Tree node tag"),
+            _ => {
+                return Err(StorageError::IndexCorrupted {
+                    page_id: page.id.0,
+                    reason: "invalid B+Tree node tag".into(),
+                });
+            }
         }
     }
 
-    fn find_leaf(&self, key: &IndexKey) -> PageId {
+    fn find_leaf(&self, key: &IndexKey) -> StorageResult<PageId> {
         let mut node_pid = self.root;
 
         loop {
-            let mut pool = self.bp.lock().unwrap();
-            let page = pool.fetch_page(node_pid);
-            let node = Self::deserialize_node(page);
-            pool.unpin_page(node_pid, false);
+            let node = {
+                let mut pool = self.bp.lock().unwrap();
+                let page = pool.fetch_page(node_pid)?;
+                let node = Self::deserialize_node(page)?;
+                pool.unpin_page(node_pid, false);
+                node
+            };
 
             match node {
-                BTreeNode::Leaf { .. } => return node_pid,
+                BTreeNode::Leaf { .. } => return Ok(node_pid),
                 BTreeNode::Internal { keys, children } => {
                     let idx = match keys.binary_search(key) {
                         Ok(i) => i + 1,
@@ -174,8 +250,8 @@ impl BPlusTree {
         }
     }
 
-    pub fn insert(&mut self, key: IndexKey, rid: RowId) {
-        if let Some((sep, new_child)) = self.insert_recursive(self.root, key, rid) {
+    pub fn insert(&mut self, key: IndexKey, rid: RowId) -> StorageResult<()> {
+        if let Some((sep, new_child)) = self.insert_recursive(self.root, key, rid)? {
             // Root split
             let mut bp = self.bp.lock().unwrap();
             let new_root = bp.pm.allocate_page();
@@ -186,9 +262,10 @@ impl BPlusTree {
                 children: vec![self.root, new_child],
             };
 
-            self.write_node(new_root, &root);
+            self.write_node(new_root, &root)?;
             self.root = new_root;
         }
+        Ok(())
     }
 
     fn insert_recursive(
@@ -196,14 +273,22 @@ impl BPlusTree {
         node_id: PageId,
         key: IndexKey,
         rid: RowId,
-    ) -> Option<(IndexKey, PageId)> {
-        let mut node = self.load_node(node_id);
+    ) -> StorageResult<Option<(IndexKey, PageId)>> {
+        let mut node = self.load_node(node_id)?;
 
         match &mut node {
             // ---------------- LEAF ----------------
             BTreeNode::Leaf { keys, values, next } => {
                 match keys.binary_search(&key) {
-                    Ok(i) => values[i].push(rid),
+                    Ok(i) => {
+                        if values.len() != keys.len() {
+                            return Err(StorageError::IndexCorrupted {
+                                page_id: node_id.0,
+                                reason: "keys/values length mismatch".into(),
+                            });
+                        }
+                        values[i].push(rid)
+                    }
                     Err(i) => {
                         keys.insert(i, key);
                         values.insert(i, vec![rid]);
@@ -211,8 +296,8 @@ impl BPlusTree {
                 }
 
                 if keys.len() <= self.max_leaf_keys() {
-                    self.write_node(node_id, &node);
-                    return None;
+                    self.write_node(node_id, &node)?;
+                    return Ok(None);
                 }
 
                 // ---- split leaf ----
@@ -235,10 +320,10 @@ impl BPlusTree {
                     next: old_next,
                 };
 
-                self.write_node(node_id, &node);
-                self.write_node(right_id, &right);
+                self.write_node(node_id, &node)?;
+                self.write_node(right_id, &right)?;
 
-                Some((sep, right_id))
+                Ok(Some((sep, right_id)))
             }
 
             // ---------------- INTERNAL ----------------
@@ -250,17 +335,17 @@ impl BPlusTree {
 
                 let child = children[idx];
 
-                if let Some((sep, new_child)) = self.insert_recursive(child, key, rid) {
+                if let Some((sep, new_child)) = self.insert_recursive(child, key, rid)? {
                     keys.insert(idx, sep);
                     children.insert(idx + 1, new_child);
                 } else {
-                    self.write_node(node_id, &node);
-                    return None;
+                    self.write_node(node_id, &node)?;
+                    return Ok(None);
                 }
 
                 if keys.len() <= self.max_internal_keys() {
-                    self.write_node(node_id, &node);
-                    return None;
+                    self.write_node(node_id, &node)?;
+                    return Ok(None);
                 }
 
                 // ---- split internal ----
@@ -281,50 +366,60 @@ impl BPlusTree {
                     children: right_children,
                 };
 
-                self.write_node(node_id, &node);
-                self.write_node(right_id, &right);
+                self.write_node(node_id, &node)?;
+                self.write_node(right_id, &right)?;
 
-                Some((sep, right_id))
+                Ok(Some((sep, right_id)))
             }
         }
     }
 
-    pub fn get(&self, key: &IndexKey) -> Vec<RowId> {
-        let leaf_pid = self.find_leaf(key);
+    pub fn get(&self, key: &IndexKey) -> StorageResult<Vec<RowId>> {
+        let leaf_pid = self.find_leaf(key)?;
 
         let mut pool = self.bp.lock().unwrap();
-        let page = pool.fetch_page(leaf_pid);
-        let node = Self::deserialize_node(page);
-        pool.unpin_page(leaf_pid, false);
+        let page = pool.fetch_page(leaf_pid)?;
+        let node = Self::deserialize_node(page)?;
+        pool.unpin_page(leaf_pid, false)?;
 
         match node {
             BTreeNode::Leaf { keys, values, .. } => match keys.binary_search(key) {
-                Ok(i) => values[i].clone(),
-                Err(_) => Vec::new(),
+                Ok(i) => Ok(values[i].clone()),
+                Err(_) => Ok(Vec::new()),
             },
-            _ => unreachable!(),
+            _ => {
+                return Err(StorageError::IndexCorrupted {
+                    page_id: leaf_pid.0,
+                    reason: "expected leaf node".into(),
+                });
+            }
         }
     }
 
-    pub fn range(&self, from: &IndexKey, to: &IndexKey) -> Vec<RowId> {
+    pub fn range(&self, from: &IndexKey, to: &IndexKey) -> StorageResult<Vec<RowId>> {
         let mut out = Vec::new();
-        let mut node_pid = self.find_leaf(from);
+        let mut node_pid = self.find_leaf(from)?;
 
         loop {
             let mut pool = self.bp.lock().unwrap();
-            let page = pool.fetch_page(node_pid);
-            let node = Self::deserialize_node(page);
+            let page = pool.fetch_page(node_pid)?;
+            let node = Self::deserialize_node(page)?;
             pool.unpin_page(node_pid, false);
             drop(pool);
 
             let (keys, values, next) = match node {
                 BTreeNode::Leaf { keys, values, next } => (keys, values, next),
-                _ => unreachable!(),
+                _ => {
+                    return Err(StorageError::IndexCorrupted {
+                        page_id: node_pid.0,
+                        reason: "expected leaf node".into(),
+                    });
+                }
             };
 
             for (k, rids) in keys.iter().zip(&values) {
                 if k > to {
-                    return out;
+                    return Ok(out);
                 }
                 if k >= from {
                     out.extend_from_slice(rids);
@@ -337,24 +432,30 @@ impl BPlusTree {
             }
         }
 
-        out
+        Ok(out)
     }
 
-    pub fn delete(&mut self, key: &IndexKey, rid: RowId) {
-        let underflow = self.delete_recursive(self.root, key, rid);
+    pub fn delete(&mut self, key: &IndexKey, rid: RowId) -> StorageResult<()> {
+        let underflow = self.delete_recursive(self.root, key, rid)?;
 
         if underflow {
-            let root_node = self.load_node(self.root);
+            let root_node = self.load_node(self.root)?;
             if let BTreeNode::Internal { children, .. } = root_node {
                 if children.len() == 1 {
                     self.root = children[0];
                 }
             }
         }
+        Ok(())
     }
 
-    fn delete_recursive(&mut self, node_id: PageId, key: &IndexKey, rid: RowId) -> bool {
-        let mut node = self.load_node(node_id);
+    fn delete_recursive(
+        &mut self,
+        node_id: PageId,
+        key: &IndexKey,
+        rid: RowId,
+    ) -> StorageResult<bool> {
+        let mut node = self.load_node(node_id)?;
 
         match &mut node {
             BTreeNode::Leaf { keys, values, .. } => {
@@ -367,8 +468,8 @@ impl BPlusTree {
                 }
 
                 let underflow = keys.len() < self.min_leaf_keys();
-                self.write_node(node_id, &node);
-                underflow
+                self.write_node(node_id, &node)?;
+                Ok(underflow)
             }
 
             BTreeNode::Internal { keys, children } => {
@@ -382,35 +483,40 @@ impl BPlusTree {
                 // Drop the node to release the borrow before recursive call
                 drop(node);
 
-                let child_underflow = self.delete_recursive(child, key, rid);
+                let child_underflow = self.delete_recursive(child, key, rid)?;
 
                 if child_underflow {
-                    self.rebalance_internal(node_id, idx);
+                    self.rebalance_internal(node_id, idx)?;
                 }
 
                 // Reload the node after potential rebalancing
-                let node = self.load_node(node_id);
+                let node = self.load_node(node_id)?;
                 let underflow = match &node {
                     BTreeNode::Internal { keys, .. } => keys.len() < self.min_internal_keys(),
                     _ => unreachable!(),
                 };
 
                 // No need to write back - rebalance_internal already did it
-                underflow
+                Ok(underflow)
             }
         }
     }
 
-    fn borrow_from_left(&mut self, parent_id: PageId, idx: usize) {
-        let parent = self.load_node(parent_id);
+    fn borrow_from_left(&mut self, parent_id: PageId, idx: usize) -> StorageResult<()> {
+        let parent = self.load_node(parent_id)?;
 
         let (left_id, cur_id) = match &parent {
             BTreeNode::Internal { children, .. } => (children[idx - 1], children[idx]),
-            _ => unreachable!(),
+            _ => {
+                return Err(StorageError::IndexCorrupted {
+                    page_id: parent_id.0,
+                    reason: "invalid node layout during rebalance".into(),
+                });
+            }
         };
 
-        let mut left = self.load_node(left_id);
-        let mut cur = self.load_node(cur_id);
+        let mut left = self.load_node(left_id)?;
+        let mut cur = self.load_node(cur_id)?;
         let mut parent = parent;
 
         match (&mut parent, &mut left, &mut cur) {
@@ -448,24 +554,35 @@ impl BPlusTree {
                 c_children.insert(0, l_children.pop().unwrap());
             }
 
-            _ => unreachable!(),
+            _ => {
+                return Err(StorageError::IndexCorrupted {
+                    page_id: parent_id.0,
+                    reason: "invalid node layout during rebalance".into(),
+                });
+            }
         }
 
-        self.write_node(left_id, &left);
-        self.write_node(cur_id, &cur);
-        self.write_node(parent_id, &parent);
+        self.write_node(left_id, &left)?;
+        self.write_node(cur_id, &cur)?;
+        self.write_node(parent_id, &parent)?;
+        Ok(())
     }
 
-    fn borrow_from_right(&mut self, parent_id: PageId, idx: usize) {
-        let parent = self.load_node(parent_id);
+    fn borrow_from_right(&mut self, parent_id: PageId, idx: usize) -> StorageResult<()> {
+        let parent = self.load_node(parent_id)?;
 
         let (cur_id, right_id) = match &parent {
             BTreeNode::Internal { children, .. } => (children[idx], children[idx + 1]),
-            _ => unreachable!(),
+            _ => {
+                return Err(StorageError::IndexCorrupted {
+                    page_id: parent_id.0,
+                    reason: "invalid node layout during rebalance".into(),
+                });
+            }
         };
 
-        let mut cur = self.load_node(cur_id);
-        let mut right = self.load_node(right_id);
+        let mut cur = self.load_node(cur_id)?;
+        let mut right = self.load_node(right_id)?;
         let mut parent = parent;
 
         match (&mut parent, &mut cur, &mut right) {
@@ -503,16 +620,22 @@ impl BPlusTree {
                 c_children.push(r_children.remove(0));
             }
 
-            _ => unreachable!(),
+            _ => {
+                return Err(StorageError::IndexCorrupted {
+                    page_id: parent_id.0,
+                    reason: "invalid node layout during rebalance".into(),
+                });
+            }
         }
 
-        self.write_node(cur_id, &cur);
-        self.write_node(right_id, &right);
-        self.write_node(parent_id, &parent);
+        self.write_node(cur_id, &cur)?;
+        self.write_node(right_id, &right)?;
+        self.write_node(parent_id, &parent)?;
+        Ok(())
     }
 
-    fn merge_children(&mut self, parent_id: PageId, idx: usize) {
-        let mut parent = self.load_node(parent_id);
+    fn merge_children(&mut self, parent_id: PageId, idx: usize) -> StorageResult<()> {
+        let mut parent = self.load_node(parent_id)?;
 
         let (left_id, right_id, sep) = match &mut parent {
             BTreeNode::Internal { keys, children } => {
@@ -525,8 +648,8 @@ impl BPlusTree {
             _ => unreachable!(),
         };
 
-        let mut left = self.load_node(left_id);
-        let right = self.load_node(right_id);
+        let mut left = self.load_node(left_id)?;
+        let right = self.load_node(right_id)?;
 
         match (&mut left, right) {
             (
@@ -564,12 +687,13 @@ impl BPlusTree {
             _ => unreachable!(),
         }
 
-        self.write_node(left_id, &left);
-        self.write_node(parent_id, &parent);
+        self.write_node(left_id, &left)?;
+        self.write_node(parent_id, &parent)?;
+        Ok(())
     }
 
-    fn rebalance_internal(&mut self, parent_id: PageId, child_idx: usize) {
-        let parent = self.load_node(parent_id);
+    fn rebalance_internal(&mut self, parent_id: PageId, child_idx: usize) -> StorageResult<()> {
+        let parent = self.load_node(parent_id)?;
 
         let children_len = match &parent {
             BTreeNode::Internal { children, .. } => children.len(),
@@ -583,9 +707,9 @@ impl BPlusTree {
                 _ => unreachable!(),
             };
 
-            if self.can_lend(left_id) {
-                self.borrow_from_left(parent_id, child_idx);
-                return;
+            if self.can_lend(left_id)? {
+                self.borrow_from_left(parent_id, child_idx)?;
+                return Ok(());
             }
         }
 
@@ -596,53 +720,56 @@ impl BPlusTree {
                 _ => unreachable!(),
             };
 
-            if self.can_lend(right_id) {
-                self.borrow_from_right(parent_id, child_idx);
-                return;
+            if self.can_lend(right_id)? {
+                self.borrow_from_right(parent_id, child_idx)?;
+                return Ok(());
             }
         }
 
         // Must merge
         if child_idx > 0 {
-            self.merge_children(parent_id, child_idx - 1);
+            self.merge_children(parent_id, child_idx - 1)?;
         } else {
-            self.merge_children(parent_id, child_idx);
+            self.merge_children(parent_id, child_idx)?;
+        }
+
+        Ok(())
+    }
+
+    fn can_lend(&self, node_id: PageId) -> StorageResult<bool> {
+        match self.load_node(node_id)? {
+            BTreeNode::Leaf { keys, .. } => Ok(keys.len() > self.min_leaf_keys()),
+            BTreeNode::Internal { keys, .. } => Ok(keys.len() > self.min_internal_keys()),
         }
     }
 
-    fn can_lend(&self, node_id: PageId) -> bool {
-        match self.load_node(node_id) {
-            BTreeNode::Leaf { keys, .. } => keys.len() > self.min_leaf_keys(),
-            BTreeNode::Internal { keys, .. } => keys.len() > self.min_internal_keys(),
-        }
-    }
-
-    fn load_node(&self, pid: PageId) -> BTreeNode {
+    fn load_node(&self, pid: PageId) -> StorageResult<BTreeNode> {
         let mut bp = self.bp.lock().unwrap();
-        let frame = bp.fetch_page(pid);
-        let node = Self::deserialize_node(frame);
+        let frame = bp.fetch_page(pid)?;
+        let node = Self::deserialize_node(frame)?;
         bp.unpin_page(pid, false);
-        node
+        Ok(node)
     }
 
-    fn write_node(&self, pid: PageId, node: &BTreeNode) {
+    fn write_node(&self, pid: PageId, node: &BTreeNode) -> StorageResult<()> {
         let mut bp = self.bp.lock().unwrap();
-        let frame = bp.fetch_page(pid);
-        Self::serialize_node(node, frame);
+        let frame = bp.fetch_page(pid)?;
+        Self::serialize_node(node, frame)?;
         bp.unpin_page(pid, true);
+        Ok(())
     }
 
-    pub fn search(&self, key: &IndexKey) -> Vec<RowId> {
+    pub fn search(&self, key: &IndexKey) -> StorageResult<Vec<RowId>> {
         let mut current = self.root;
 
         loop {
-            let node = self.load_node(current);
+            let node = self.load_node(current)?;
 
             match node {
                 BTreeNode::Leaf { keys, values, .. } => {
                     return match keys.binary_search(key) {
-                        Ok(i) => values[i].clone(),
-                        Err(_) => Vec::new(),
+                        Ok(i) => Ok(values[i].clone()),
+                        Err(_) => Ok(Vec::new()),
                     };
                 }
 

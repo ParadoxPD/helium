@@ -7,6 +7,7 @@ use std::{
 
 use crate::storage::{
     buffer::frame::PAGE_SIZE,
+    errors::{StorageError, StorageResult},
     page::page_id::PageId,
     pagemgr::{frame::PageFrame, manager::PageManager},
 };
@@ -52,7 +53,7 @@ impl PageManager for FilePageManager {
         id
     }
 
-    fn fetch_page(&mut self, id: PageId) -> &mut PageFrame {
+    fn fetch_page(&mut self, id: PageId) -> StorageResult<&mut PageFrame> {
         if !self.pages.contains_key(&id) {
             let mut frame = PageFrame {
                 id,
@@ -61,13 +62,21 @@ impl PageManager for FilePageManager {
             };
 
             let offset = id.0 * PAGE_SIZE as u64;
-            self.file.seek(SeekFrom::Start(offset)).unwrap();
-            self.file.read_exact(&mut frame.data).unwrap_or(());
+            self.file
+                .seek(SeekFrom::Start(offset))
+                .map_err(|e| StorageError::Io {
+                    message: e.to_string(),
+                })?;
+            self.file
+                .read_exact(&mut frame.data)
+                .map_err(|e| StorageError::Io {
+                    message: e.to_string(),
+                })?;
 
             self.pages.insert(id, frame);
         }
 
-        self.pages.get_mut(&id).unwrap()
+        Ok(self.pages.get_mut(&id).unwrap())
     }
 
     fn flush_page(&mut self, id: PageId) {

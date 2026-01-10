@@ -12,6 +12,7 @@ use crate::execution::operators::scan::ScanExecutor;
 use crate::execution::operators::sort::SortExecutor;
 use crate::execution::operators::update::UpdateExecutor;
 use crate::ir::plan::LogicalPlan;
+use crate::storage::errors::StorageError;
 use crate::storage::index::btree::key::IndexKey;
 use crate::storage::page::row_id::RowId;
 use crate::types::value::Value;
@@ -144,7 +145,7 @@ pub fn build_executor(plan: LogicalPlan, ctx: &ExecutionContext) -> Box<dyn Exec
     }
 }
 
-pub fn execute_insert(exec: &mut InsertExecutor, ctx: &ExecutionContext) -> usize {
+pub fn execute_insert(exec: &mut InsertExecutor, ctx: &ExecutionContext) -> StorageResult<usize> {
     let table = ctx.catalog.get_table_by_id(exec.table_id).unwrap();
     let heap = table.heap;
 
@@ -159,7 +160,12 @@ pub fn execute_insert(exec: &mut InsertExecutor, ctx: &ExecutionContext) -> usiz
 
         for index_entry in ctx.catalog.indexes_for_table(exec.table_id) {
             let col_id = index_entry.meta.column_ids[0];
-            let key = IndexKey::try_from(&values[col_id.0 as usize]).expect("Not found");
+            let key = IndexKey::try_from(&values[col_id.0 as usize]).map_err(|e| {
+                StorageError::IndexViolation {
+                    index_name: self.name.clone(),
+                    reason: e.to_string(),
+                }
+            })?;
 
             index_entry.index.lock().unwrap().insert(key, rid);
         }
@@ -194,7 +200,12 @@ pub fn execute_delete(exec: &mut DeleteExecutor, ctx: &ExecutionContext) -> usiz
     for (rid, old_row) in to_delete {
         for index_entry in ctx.catalog.indexes_for_table(exec.table_id) {
             let col_id = index_entry.meta.column_ids[0];
-            let key = IndexKey::try_from(&old_row[col_id.0 as usize]).expect("Not found");
+            let key = IndexKey::try_from(&old_row[col_id.0 as usize]).map_err(|e| {
+                StorageError::IndexViolation {
+                    index_name: self.name.clone(),
+                    reason: e.to_string(),
+                }
+            })?;
 
             index_entry.index.lock().unwrap().delete(&key, rid);
         }

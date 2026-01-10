@@ -1,4 +1,5 @@
 use crate::storage::buffer::frame::PAGE_SIZE;
+use crate::storage::errors::{StorageError, StorageResult};
 use crate::storage::page::row_id::RowId;
 use crate::types::value::Value;
 
@@ -33,17 +34,31 @@ impl RowPage {
         }
     }
 
-    pub fn get(&self, slot_id: u16) -> Option<&StorageRow> {
-        let slot = self.slots.get(slot_id as usize)?;
+    pub fn get(&self, slot_id: u16) -> StorageResult<&StorageRow> {
+        let slot = self
+            .slots
+            .get(slot_id as usize)
+            .ok_or(StorageError::InvalidRowId {
+                page_id: self.id.0,
+                slot_id,
+            })?;
 
         if !slot.used {
-            return None;
+            return Err(StorageError::InvalidRowId {
+                page_id: self.id.0,
+                slot_id,
+            });
         }
 
-        self.rows.get(slot.offset as usize)
+        self.rows
+            .get(slot.offset as usize)
+            .ok_or(StorageError::CorruptedPage {
+                page_id: self.id.0,
+                reason: "slot offset out of bounds".into(),
+            })
     }
 
-    pub fn from_bytes(id: PageId, buf: &[u8]) -> Self {
+    pub fn from_bytes(id: PageId, buf: &[u8]) -> StorageResult<Self> {
         // ---- header ----
         let slot_count = u16::from_le_bytes([buf[0], buf[1]]) as usize;
         let row_count = u16::from_le_bytes([buf[2], buf[3]]) as usize;
@@ -94,24 +109,23 @@ impl RowPage {
             .filter_map(|(i, s)| if !s.used { Some(i as u16) } else { None })
             .collect();
 
-        Self {
+        Ok(Self {
             id,
             slots,
             rows,
             free_slots,
             capacity,
-        }
+        })
     }
 
     pub fn slots_len(&self) -> usize {
         self.slots.len()
     }
 
-    pub fn insert(&mut self, values: Vec<Value>) -> Option<RowId> {
+    pub fn insert(&mut self, values: Vec<Value>) -> StorageResult<RowId> {
         if self.num_rows() == self.capacity {
-            return None;
+            return Err(StorageError::PageFull { page_id: self.id.0 });
         }
-
         let slot_id = if let Some(free) = self.free_slots.pop() {
             let slot = &mut self.slots[free as usize];
             slot.used = true;
@@ -128,25 +142,32 @@ impl RowPage {
 
         self.rows.push(StorageRow { values });
 
-        Some(RowId {
+        Ok(RowId {
             page_id: self.id,
             slot_id,
         })
     }
 
-    pub fn delete(&mut self, slot_id: u16) -> bool {
-        let slot = match self.slots.get_mut(slot_id as usize) {
-            Some(s) if s.used => s,
-            _ => return false,
-        };
+    pub fn delete(&mut self, slot_id: u16) -> StorageResult<()> {
+        let slot = self
+            .slots
+            .get_mut(slot_id as usize)
+            .ok_or(StorageError::InvalidRowId {
+                page_id: self.id.0,
+                slot_id,
+            })?;
+
+        if !slot.used {
+            return Err(StorageError::InvalidRowId {
+                page_id: self.id.0,
+                slot_id,
+            });
+        }
 
         slot.used = false;
         self.free_slots.push(slot_id);
 
-        //#[cfg(debug_assertions)]
-        //self.assert_consistent();
-
-        true
+        Ok(())
     }
 
     pub fn write_bytes(&self, buf: &mut [u8]) {
@@ -212,7 +233,7 @@ impl Page for RowPage {
         self.num_rows() == self.capacity
     }
 
-    fn get_row(&self, slot_id: u16) -> Option<&StorageRow> {
+    fn get_row(&self, slot_id: u16) -> StorageResult<&StorageRow> {
         self.get(slot_id)
     }
 }

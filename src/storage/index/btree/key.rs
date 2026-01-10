@@ -1,4 +1,7 @@
-use crate::types::value::Value;
+use crate::{
+    storage::errors::{StorageError, StorageResult},
+    types::value::Value,
+};
 
 /// A total-orderable key usable by B+Tree.
 /// NO NULLs allowed.
@@ -43,29 +46,70 @@ impl IndexKey {
         }
     }
 
-    pub fn deserialize(input: &mut &[u8]) -> Self {
-        let tag = input[0];
+    pub fn deserialize(input: &mut &[u8], page_id: u64) -> StorageResult<IndexKey> {
+        // Read tag
+        let tag = *input.get(0).ok_or(StorageError::IndexCorrupted {
+            page_id,
+            reason: "unexpected EOF reading IndexKey tag".into(),
+        })?;
         *input = &input[1..];
 
         match tag {
+            // -------- Int64 --------
             0 => {
-                let (n, rest) = input.split_at(8);
-                *input = rest;
-                IndexKey::Int(i64::from_le_bytes(n.try_into().unwrap()))
+                let bytes = input.get(..8).ok_or(StorageError::IndexCorrupted {
+                    page_id,
+                    reason: "unexpected EOF reading i64 IndexKey".into(),
+                })?;
+                *input = &input[8..];
+
+                Ok(IndexKey::Int(i64::from_le_bytes(
+                    bytes.try_into().unwrap(), // length guaranteed
+                )))
             }
+
+            // -------- Bool --------
             1 => {
-                let v = input[0] != 0;
+                let v = *input.get(0).ok_or(StorageError::IndexCorrupted {
+                    page_id,
+                    reason: "unexpected EOF reading bool IndexKey".into(),
+                })?;
                 *input = &input[1..];
-                IndexKey::Bool(v)
+
+                Ok(IndexKey::Bool(v != 0))
             }
+
+            // -------- String --------
             2 => {
-                let (len, rest) = input.split_at(4);
-                let len = u32::from_le_bytes(len.try_into().unwrap()) as usize;
-                let (s, rest2) = rest.split_at(len);
-                *input = rest2;
-                IndexKey::String(String::from_utf8(s.to_vec()).unwrap())
+                let len_bytes = input.get(..4).ok_or(StorageError::IndexCorrupted {
+                    page_id,
+                    reason: "unexpected EOF reading string length".into(),
+                })?;
+                let len = u32::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
+
+                *input = &input[4..];
+
+                let str_bytes = input.get(..len).ok_or(StorageError::IndexCorrupted {
+                    page_id,
+                    reason: "unexpected EOF reading string bytes".into(),
+                })?;
+                *input = &input[len..];
+
+                let s = String::from_utf8(str_bytes.to_vec()).map_err(|_| {
+                    StorageError::IndexCorrupted {
+                        page_id,
+                        reason: "invalid UTF-8 in IndexKey::String".into(),
+                    }
+                })?;
+
+                Ok(IndexKey::String(s))
             }
-            _ => panic!("invalid IndexKey tag"),
+
+            // -------- Invalid Tag --------
+            _ => Err(StorageError::IndexCorrupted {
+                page_id,
+                reason: format!("invalid IndexKey tag {}", tag),
+            }),
         }
     }
 }

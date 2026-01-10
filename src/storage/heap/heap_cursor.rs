@@ -1,4 +1,5 @@
 use crate::storage::{
+    errors::{StorageError, StorageResult},
     heap::heap_table::HeapTable,
     page::{page_id::PageId, row::StorageRow, row_id::RowId, row_page::RowPage},
 };
@@ -33,15 +34,22 @@ impl<'a> Iterator for HeapCursor<'a> {
             drop(pages);
 
             let mut bp = self.table.bp.lock().unwrap();
-            let frame = bp.fetch_page(pid);
-            let page = RowPage::from_bytes(pid, &frame.data);
+            let frame = bp.fetch_page(pid).unwrap();
+            let page = match RowPage::from_bytes(pid, &frame.data) {
+                Ok(p) => p,
+                Err(_) => {
+                    self.page_idx += 1;
+                    self.slot_idx = 0;
+                    continue; // skip corrupted page
+                }
+            };
             bp.unpin_page(pid, false);
 
             while (self.slot_idx as usize) < page.slots_len() {
                 let slot_id = self.slot_idx;
                 self.slot_idx += 1;
 
-                if let Some(row) = page.get(slot_id) {
+                if let Ok(row) = page.get(slot_id) {
                     return Some((
                         RowId {
                             page_id: pid,
@@ -57,4 +65,3 @@ impl<'a> Iterator for HeapCursor<'a> {
         }
     }
 }
-

@@ -1,3 +1,5 @@
+use crate::storage::errors::StorageResult;
+
 use super::page_id::PageId;
 use super::row::StorageRow;
 
@@ -6,5 +8,5 @@ pub trait Page {
     fn capacity(&self) -> usize;
     fn num_rows(&self) -> usize;
     fn is_full(&self) -> bool;
-    fn get_row(&self, slot_id: u16) -> Option<&StorageRow>;
+    fn get_row(&self, slot_id: u16) -> StorageResult<&StorageRow>;
 }

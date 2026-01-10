@@ -5,6 +5,7 @@ use std::{
 
 use crate::storage::{
     buffer::frame::{BufferFrame, PageFrame},
+    errors::{StorageError, StorageResult},
     page::page_id::PageId,
     pagemgr::manager::PageManager,
 };
@@ -24,43 +25,57 @@ impl BufferPool {
         }
     }
 
-    pub fn fetch_page(&mut self, pid: PageId) -> &mut PageFrame {
-        let frame = self.frames.entry(pid).or_insert_with(|| {
-            let page = {
-                let pm_page = self.pm.fetch_page(pid);
-                PageFrame {
-                    id: pm_page.id,
-                    data: pm_page.data,
-                    dirty: false,
-                }
+    pub fn fetch_page(&mut self, pid: PageId) -> StorageResult<&mut PageFrame> {
+        if !self.frames.contains_key(&pid) {
+            let pm_page = self.pm.fetch_page(pid)?;
+
+            let page = PageFrame {
+                id: pm_page.id,
+                data: pm_page.data,
+                dirty: false,
             };
 
-            BufferFrame { page, pin_count: 0 }
-        });
+            self.frames.insert(pid, BufferFrame { page, pin_count: 0 });
+        }
+
+        let frame = self
+            .frames
+            .get_mut(&pid)
+            .ok_or(StorageError::PageNotFound { page_id: pid.0 })?;
 
         frame.pin_count += 1;
-        &mut frame.page
+        Ok(&mut frame.page)
     }
 
-    pub fn unpin_page(&mut self, pid: PageId, dirty: bool) {
-        let frame = self.frames.get_mut(&pid).expect("unpinning unknown page");
+    pub fn unpin_page(&mut self, pid: PageId, dirty: bool) -> StorageResult<()> {
+        let frame = self
+            .frames
+            .get_mut(&pid)
+            .ok_or(StorageError::PageNotFound { page_id: pid.0 })?;
 
         if dirty {
             frame.page.dirty = true;
         }
 
-        assert!(frame.pin_count > 0);
+        if frame.pin_count == 0 {
+            return Err(StorageError::CorruptedPage {
+                page_id: pid.0,
+                reason: "unbalanced unpin".into(),
+            });
+        }
         frame.pin_count -= 1;
+        Ok(())
     }
 
-    pub fn flush_all(&mut self) {
+    pub fn flush_all(&mut self) -> StorageResult<()> {
         for frame in self.frames.values_mut() {
             if frame.page.dirty {
-                let pm_page = self.pm.fetch_page(frame.page.id);
+                let pm_page = self.pm.fetch_page(frame.page.id)?;
                 pm_page.data.copy_from_slice(&frame.page.data);
                 self.pm.flush_page(frame.page.id);
                 frame.page.dirty = false;
             }
         }
+        Ok(())
     }
 }

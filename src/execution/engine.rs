@@ -12,7 +12,8 @@ use crate::execution::operators::scan::ScanExecutor;
 use crate::execution::operators::sort::SortExecutor;
 use crate::execution::operators::update::UpdateExecutor;
 use crate::ir::plan::LogicalPlan;
-use crate::storage::page::page::RowId;
+use crate::storage::index::btree::key::IndexKey;
+use crate::storage::page::row_id::RowId;
 use crate::types::value::Value;
 
 pub enum ExecutionResult {
@@ -145,7 +146,7 @@ pub fn build_executor(plan: LogicalPlan, ctx: &ExecutionContext) -> Box<dyn Exec
 
 pub fn execute_insert(exec: &mut InsertExecutor, ctx: &ExecutionContext) -> usize {
     let table = ctx.catalog.get_table_by_id(exec.table_id).unwrap();
-    let heap = table.heap();
+    let heap = table.heap;
 
     for row_exprs in &exec.rows {
         let mut values = Vec::with_capacity(row_exprs.len());
@@ -158,7 +159,7 @@ pub fn execute_insert(exec: &mut InsertExecutor, ctx: &ExecutionContext) -> usiz
 
         for index_entry in ctx.catalog.indexes_for_table(exec.table_id) {
             let col_id = index_entry.meta.column_ids[0];
-            let key = &values[col_id.0 as usize];
+            let key = IndexKey::try_from(&values[col_id.0 as usize]).expect("Not found");
 
             index_entry.index.lock().unwrap().insert(key, rid);
         }
@@ -181,8 +182,8 @@ pub fn execute_delete(exec: &mut DeleteExecutor, ctx: &ExecutionContext) -> usiz
 
         if let Some(pred) = &exec.predicate {
             match eval_expr(pred, &row) {
-                Value::Bool(true) => {}
-                Value::Bool(false) | Value::Null => continue,
+                Value::Boolean(true) => {}
+                Value::Boolean(false) | Value::Null => continue,
                 _ => panic!("DELETE predicate not boolean"),
             }
         }
@@ -193,9 +194,9 @@ pub fn execute_delete(exec: &mut DeleteExecutor, ctx: &ExecutionContext) -> usiz
     for (rid, old_row) in to_delete {
         for index_entry in ctx.catalog.indexes_for_table(exec.table_id) {
             let col_id = index_entry.meta.column_ids[0];
-            let key = &old_row[col_id.0 as usize];
+            let key = IndexKey::try_from(&old_row[col_id.0 as usize]).expect("Not found");
 
-            index_entry.index.lock().unwrap().delete(key, rid);
+            index_entry.index.lock().unwrap().delete(&key, rid);
         }
 
         heap.delete(rid);
@@ -217,8 +218,8 @@ pub fn execute_update(exec: &mut UpdateExecutor, ctx: &ExecutionContext) -> usiz
 
         if let Some(pred) = &exec.predicate {
             match eval_expr(pred, &old_row) {
-                Value::Bool(true) => {}
-                Value::Bool(false) | Value::Null => continue,
+                Value::Boolean(true) => {}
+                Value::Boolean(false) | Value::Null => continue,
                 _ => panic!("UPDATE predicate not boolean"),
             }
         }

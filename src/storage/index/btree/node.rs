@@ -1,4 +1,3 @@
-use crate::storage::heap::value_codec::ValueCodec;
 use crate::storage::index::btree::key::IndexKey;
 use crate::storage::page::page_id::PageId;
 use crate::storage::page::row_id::RowId;
@@ -118,4 +117,3 @@ impl BTreeNode {
         }
     }
 }
-

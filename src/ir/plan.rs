@@ -2,7 +2,7 @@
 //!
 //! This module is FROZEN.
 
-use crate::ir::expr::Expr;
+use crate::{catalog::ids::ColumnId, ir::expr::Expr};
 
 pub type TableId = u32;
 pub type IndexId = u32;
@@ -46,6 +46,22 @@ pub enum LogicalPlan {
         table_id: TableId,
         index_id: IndexId,
         predicate: Expr,
+    },
+
+    Insert {
+        table_id: TableId,
+        rows: Vec<Vec<Expr>>,
+    },
+
+    Delete {
+        table_id: TableId,
+        predicate: Option<Expr>,
+    },
+
+    Update {
+        table_id: TableId,
+        assignments: Vec<(ColumnId, Expr)>,
+        predicate: Option<Expr>,
     },
 }
 

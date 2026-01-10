@@ -77,8 +77,8 @@ impl Executor for JoinExecutor {
                 let pred = eval_expr(&self.on, &joined);
 
                 match pred {
-                    Value::Bool(true) => return Some(joined),
-                    Value::Bool(false) | Value::Null => continue,
+                    Value::Boolean(true) => return Some(joined),
+                    Value::Boolean(false) | Value::Null => continue,
                     other => panic!("Join predicate did not evaluate to boolean: {:?}", other),
                 }
             }

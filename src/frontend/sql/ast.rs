@@ -1,9 +1,4 @@
-use std::fmt;
-
-use crate::{
-    frontend::sql::{lexer::Token, parser::Position},
-    types::value::Value,
-};
+use crate::types::value::Value;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
@@ -144,65 +139,4 @@ pub enum FromItem {
         right: Box<FromItem>,
         on: Expr,
     },
-}
-
-#[derive(Debug, Clone)]
-pub enum ParseError {
-    UnexpectedEOF {
-        position: Position,
-    },
-    UnexpectedToken {
-        token: Token,
-        position: Position,
-    },
-    Expected {
-        expected: String,
-        found: Option<String>,
-        position: Position,
-    },
-    Unsupported {
-        message: String,
-        position: Position,
-    },
-    InvalidLiteral {
-        literal: String,
-        position: Position,
-    },
-    Message {
-        message: String,
-        position: Position,
-    },
-}
-
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ParseError::UnexpectedEOF { position } => {
-                write!(f, "Unexpected end of file at {}", position)
-            }
-            ParseError::UnexpectedToken { token, position } => {
-                write!(f, "Unexpected token {:?} at {}", token, position)
-            }
-            ParseError::Expected {
-                expected,
-                found,
-                position,
-            } => {
-                write!(
-                    f,
-                    "Expected {} but found {:?} at {}",
-                    expected, found, position
-                )
-            }
-            ParseError::Unsupported { message, position } => {
-                write!(f, "Unsupported: {} at {}", message, position)
-            }
-            ParseError::InvalidLiteral { literal, position } => {
-                write!(f, "Invalid literal '{}' at {}", literal, position)
-            }
-            ParseError::Message { message, position } => {
-                write!(f, "{} at {}", message, position)
-            }
-        }
-    }
 }

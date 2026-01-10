@@ -103,13 +103,24 @@ impl Catalog {
             unique,
         };
 
+        let entry = IndexEntry {
+            meta,
+            index: todo!(),
+        };
+
         self.indexes_by_name.insert(name, index_id);
-        self.indexes_by_id.insert(index_id, meta);
+        self.indexes_by_id.insert(index_id, entry);
 
         Ok(index_id)
     }
 
-    pub fn get_index_by_id(&self, id: IndexId) -> Option<&IndexMeta> {
+    pub fn get_index_by_id(&self, id: IndexId) -> Option<&IndexEntry> {
         self.indexes_by_id.get(&id)
+    }
+
+    pub fn indexes_for_table(&self, table_id: TableId) -> impl Iterator<Item = &IndexEntry> {
+        self.indexes_by_id
+            .values()
+            .filter(move |i| i.meta.table_id == table_id)
     }
 }

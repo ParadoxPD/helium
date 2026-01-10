@@ -6,12 +6,11 @@
 //!
 //! This module MUST NOT depend on IR or execution.
 
-use std::collections::HashMap;
-
 use crate::binder::bound::BoundExpr;
 use crate::binder::errors::BindError;
 use crate::binder::scope::ColumnScope;
-use crate::frontend::sql::ast::{BinaryOp, Expr as SqlExpr, UnaryOp};
+use crate::frontend::sql::ast::Expr as SqlExpr;
+use crate::ir::expr::BinaryOp;
 use crate::types::datatype::DataType;
 use crate::types::schema::ColumnId;
 use crate::types::value::Value;
@@ -79,7 +78,7 @@ fn literal_type(v: &Value) -> DataType {
 
 fn infer_unary_type(op: UnaryOp, inner: &DataType) -> Result<DataType, BindError> {
     match op {
-        UnaryOp::Neg => {
+        UnaryOp::Minus => {
             if *inner == DataType::Int64 || *inner == DataType::Float64 {
                 Ok(inner.clone())
             } else {
@@ -108,8 +107,6 @@ fn infer_binary_type(
     left: &DataType,
     right: &DataType,
 ) -> Result<DataType, BindError> {
-    use BinaryOp::*;
-
     match op {
         Add | Sub | Mul | Div => {
             if left == right && (*left == DataType::Int64 || *left == DataType::Float64) {

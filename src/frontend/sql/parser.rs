@@ -1,7 +1,10 @@
 use crate::{
     db_debug, db_info, db_scope, db_trace,
     diagnostics::debugger::{Component, DebugLevel},
-    frontend::sql::lexer::{Token, Tokenizer},
+    frontend::sql::{
+        errors::ParseError,
+        lexer::{Token, Tokenizer},
+    },
     types::value::Value,
 };
 
@@ -158,7 +161,7 @@ impl Parser {
                             db_info!(Component::Parser, "Parsing CREATE INDEX statement");
                             self.parse_create_index()?
                         }
-                        _ => Err(ParseError::Message {
+                        _ => Err(ParseError::SyntaxError {
                             message: "expected TABLE or INDEX".into(),
                             position: pos,
                         })?,
@@ -178,7 +181,7 @@ impl Parser {
                             db_info!(Component::Parser, "Parsing CREATE INDEX statement");
                             self.parse_drop_index()?
                         }
-                        _ => Err(ParseError::Message {
+                        _ => Err(ParseError::SyntaxError {
                             message: "expected TABLE or INDEX".into(),
                             position: pos,
                         })?,
@@ -365,8 +368,8 @@ impl Parser {
         let pos = self.current_position();
 
         match self.next() {
-            Token::True => Ok(Expr::Literal(Value::Bool(true))),
-            Token::False => Ok(Expr::Literal(Value::Bool(false))),
+            Token::True => Ok(Expr::Literal(Value::Boolean(true))),
+            Token::False => Ok(Expr::Literal(Value::Boolean(false))),
             Token::Null => Ok(Expr::Literal(Value::Null)),
 
             Token::Ident(first) => {
@@ -502,7 +505,7 @@ impl Parser {
                 "TEXT" => SqlType::Text,
                 "BOOL" => SqlType::Bool,
                 _ => {
-                    return Err(ParseError::Message {
+                    return Err(ParseError::SyntaxError {
                         message: format!("unknown type '{}'", ty),
                         position: pos,
                     });

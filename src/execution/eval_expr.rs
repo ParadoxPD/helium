@@ -30,7 +30,7 @@ fn eval_unary(op: UnaryOp, v: Value) -> Value {
         (_, Value::Null) => Value::Null,
 
         (UnaryOp::Neg, Value::Int64(x)) => Value::Int64(-x),
-        (UnaryOp::Not, Value::Bool(b)) => Value::Bool(!b),
+        (UnaryOp::Not, Value::Boolean(b)) => Value::Boolean(!b),
 
         _ => panic!("Invalid unary operation"),
     }
@@ -49,16 +49,16 @@ fn eval_binary(op: BinaryOp, l: Value, r: Value) -> Value {
         (Div, _, Value::Int64(0)) => panic!("Division by zero"),
         (Div, Value::Int64(a), Value::Int64(b)) => Value::Int64(a / b),
 
-        (Eq, a, b) => Value::Bool(a == b),
-        (Neq, a, b) => Value::Bool(a != b),
+        (Eq, a, b) => Value::Boolean(a == b),
+        (Neq, a, b) => Value::Boolean(a != b),
 
-        (Lt, Value::Int64(a), Value::Int64(b)) => Value::Bool(a < b),
-        (Lte, Value::Int64(a), Value::Int64(b)) => Value::Bool(a <= b),
-        (Gt, Value::Int64(a), Value::Int64(b)) => Value::Bool(a > b),
-        (Gte, Value::Int64(a), Value::Int64(b)) => Value::Bool(a >= b),
+        (Lt, Value::Int64(a), Value::Int64(b)) => Value::Boolean(a < b),
+        (Lte, Value::Int64(a), Value::Int64(b)) => Value::Boolean(a <= b),
+        (Gt, Value::Int64(a), Value::Int64(b)) => Value::Boolean(a > b),
+        (Gte, Value::Int64(a), Value::Int64(b)) => Value::Boolean(a >= b),
 
-        (And, Value::Bool(a), Value::Bool(b)) => Value::Bool(a && b),
-        (Or, Value::Bool(a), Value::Bool(b)) => Value::Bool(a || b),
+        (And, Value::Boolean(a), Value::Boolean(b)) => Value::Boolean(a && b),
+        (Or, Value::Boolean(a), Value::Boolean(b)) => Value::Boolean(a || b),
 
         _ => panic!("Invalid binary operation"),
     }

@@ -1,5 +1,4 @@
 use crate::storage::buffer::frame::PAGE_SIZE;
-use crate::storage::heap::value_codec::ValueCodec;
 use crate::storage::page::row_id::RowId;
 use crate::types::value::Value;
 
@@ -78,7 +77,7 @@ impl RowPage {
             let mut slice = &buf[row_ptr..];
 
             for _ in 0..val_count {
-                let v = ValueCodec::deserialize(&mut slice);
+                let v = Value::deserialize(&mut slice);
                 values.push(v);
             }
 
@@ -186,7 +185,7 @@ impl RowPage {
 
             for v in values {
                 let mut tmp = Vec::new();
-                ValueCodec::serialize(v, &mut tmp);
+                v.serialize(&mut tmp);
                 buf[row_ptr..row_ptr + tmp.len()].copy_from_slice(&tmp);
                 row_ptr += tmp.len();
             }

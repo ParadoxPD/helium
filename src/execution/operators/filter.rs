@@ -25,8 +25,8 @@ impl Executor for FilterExecutor {
             let value = eval_expr(&self.predicate, &row);
 
             match value {
-                Value::Bool(true) => return Some(row),
-                Value::Bool(false) | Value::Null => {
+                Value::Boolean(true) => return Some(row),
+                Value::Boolean(false) | Value::Null => {
                     continue;
                 }
                 other => {

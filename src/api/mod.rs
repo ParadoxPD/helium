@@ -1,4 +1,4 @@
 pub mod connection;
 pub mod db;
+pub mod errors;
 pub mod statement;
-pub mod unit_tests;

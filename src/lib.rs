@@ -1,13 +1,15 @@
-pub mod config;
-pub mod error;
-
 pub mod api;
-pub mod buffer;
-pub mod common;
-pub mod debugger;
-pub mod exec;
+pub mod binder;
+pub mod catalog;
+pub mod cli;
+pub mod diagnostics;
+pub mod execution;
 pub mod frontend;
 pub mod ir;
 pub mod optimizer;
+pub mod planner;
 pub mod storage;
+pub mod tui;
 pub mod txn;
+pub mod types;
+pub mod util;

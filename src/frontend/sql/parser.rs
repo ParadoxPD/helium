@@ -1,8 +1,11 @@
 use crate::{
-    common::value::Value,
     db_debug, db_info, db_scope, db_trace,
-    debugger::{Component, debugger::DebugLevel},
-    frontend::sql::lexer::{Token, Tokenizer},
+    diagnostics::debugger::{Component, DebugLevel},
+    frontend::sql::{
+        errors::ParseError,
+        lexer::{Token, Tokenizer},
+    },
+    types::value::Value,
 };
 
 use super::ast::*;
@@ -158,7 +161,7 @@ impl Parser {
                             db_info!(Component::Parser, "Parsing CREATE INDEX statement");
                             self.parse_create_index()?
                         }
-                        _ => Err(ParseError::Message {
+                        _ => Err(ParseError::SyntaxError {
                             message: "expected TABLE or INDEX".into(),
                             position: pos,
                         })?,
@@ -178,7 +181,7 @@ impl Parser {
                             db_info!(Component::Parser, "Parsing CREATE INDEX statement");
                             self.parse_drop_index()?
                         }
-                        _ => Err(ParseError::Message {
+                        _ => Err(ParseError::SyntaxError {
                             message: "expected TABLE or INDEX".into(),
                             position: pos,
                         })?,
@@ -250,12 +253,29 @@ impl Parser {
         } else {
             None
         };
+
+        let offset = if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("offset")) {
+            self.next();
+            match self.next() {
+                Token::Int(n) => Some(*n as usize),
+                t => {
+                    return Err(ParseError::UnexpectedToken {
+                        token: t.clone(),
+                        position: self.current_position(),
+                    });
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(SelectStmt {
             columns,
             from,
             where_clause,
             order_by,
             limit,
+            offset,
         })
     }
     fn parse_order_by(&mut self) -> Result<Vec<OrderByExpr>, ParseError> {
@@ -365,8 +385,8 @@ impl Parser {
         let pos = self.current_position();
 
         match self.next() {
-            Token::True => Ok(Expr::Literal(Value::Bool(true))),
-            Token::False => Ok(Expr::Literal(Value::Bool(false))),
+            Token::True => Ok(Expr::Literal(Value::Boolean(true))),
+            Token::False => Ok(Expr::Literal(Value::Boolean(false))),
             Token::Null => Ok(Expr::Literal(Value::Null)),
 
             Token::Ident(first) => {
@@ -502,7 +522,7 @@ impl Parser {
                 "TEXT" => SqlType::Text,
                 "BOOL" => SqlType::Bool,
                 _ => {
-                    return Err(ParseError::Message {
+                    return Err(ParseError::SyntaxError {
                         message: format!("unknown type '{}'", ty),
                         position: pos,
                     });

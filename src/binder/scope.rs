@@ -25,7 +25,6 @@ impl Schema {
 /// Maps visible column names to ColumnId + DataType.
 #[derive(Debug)]
 pub struct ColumnScope {
-    /// name -> (ColumnId, DataType)
     columns: HashMap<String, Vec<(ColumnId, DataType)>>,
 }
 
@@ -62,10 +61,7 @@ impl ColumnScope {
 impl<'a> Binder<'a> {
     pub fn collect_tables(&mut self, from: &FromItem) -> Result<(), BindError> {
         match from {
-            FromItem::Table { name, alias } => {
-                let alias = alias.clone().unwrap_or_else(|| name.clone());
-                self.catalog.insert(alias, name.clone());
-            }
+            FromItem::Table { name, alias } => {}
             FromItem::Join { left, right, .. } => {
                 self.collect_tables(left)?;
                 self.collect_tables(right)?;

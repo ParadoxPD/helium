@@ -4,23 +4,23 @@ use crate::execution::eval_expr::eval_expr;
 use crate::execution::executor::{ExecResult, Executor, Row};
 use crate::ir::expr::Expr;
 
-pub struct ProjectExecutor<'a> {
-    input: Box<dyn Executor<'a>>,
+pub struct ProjectExecutor {
+    input: Box<dyn Executor>,
     exprs: Vec<Expr>,
 }
 
-impl<'a> ProjectExecutor<'a> {
-    pub fn new(input: Box<dyn Executor<'a>>, exprs: Vec<Expr>) -> Self {
+impl ProjectExecutor {
+    pub fn new(input: Box<dyn Executor>, exprs: Vec<Expr>) -> Self {
         Self { input, exprs }
     }
 }
 
-impl<'a> Executor<'a> for ProjectExecutor<'a> {
-    fn open(&mut self, ctx: &ExecutionContext) -> ExecResult<()> {
+impl Executor for ProjectExecutor {
+    fn open(&mut self, ctx: &mut ExecutionContext) -> ExecResult<()> {
         self.input.open(ctx)
     }
 
-    fn next(&mut self, ctx: &ExecutionContext) -> ExecResult<Option<Row>> {
+    fn next(&mut self, ctx: &mut ExecutionContext) -> ExecResult<Option<Row>> {
         let row = match self.input.next(ctx)? {
             Some(r) => r,
             None => return Ok(None),
@@ -34,7 +34,7 @@ impl<'a> Executor<'a> for ProjectExecutor<'a> {
         Ok(Some(out))
     }
 
-    fn close(&mut self, ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
+    fn close(&mut self, ctx: &mut ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
         self.input.close(ctx)
     }
 }

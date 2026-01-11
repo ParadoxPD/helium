@@ -50,8 +50,12 @@ impl fmt::Display for StorageError {
             StorageError::Io { message } => {
                 write!(f, "storage IO error: {}", message)
             }
-            StorageError::IndexCorrupted { page_id, reason } => todo!(),
-            StorageError::IndexInvariantViolation { reason } => todo!(),
+            StorageError::IndexCorrupted { page_id, reason } => {
+                write!(f, "index corrupted at page {}: {}", page_id, reason)
+            }
+            StorageError::IndexInvariantViolation { reason } => {
+                write!(f, "index invariant violated: {}", reason)
+            }
         }
     }
 }

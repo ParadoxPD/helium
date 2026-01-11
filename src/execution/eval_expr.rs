@@ -1,3 +1,4 @@
+use crate::catalog::ids::ColumnId;
 use crate::execution::errors::ExecutionError;
 use crate::execution::executor::ExecResult;
 use crate::ir::expr::{BinaryOp, Expr, UnaryOp};
@@ -8,10 +9,15 @@ pub fn eval_expr(expr: &Expr, row: &[Value]) -> ExecResult<Value> {
         Expr::Literal(v) => Ok(v.clone()),
         Expr::Null => Ok(Value::Null),
 
-        Expr::BoundColumn { index, .. } => row
-            .get(*index)
-            .cloned()
-            .ok_or(ExecutionError::UnboundColumn),
+        Expr::BoundColumn { column_id } => {
+            let ColumnId(idx) = column_id;
+            row.get(*idx as usize)
+                .cloned()
+                .ok_or(ExecutionError::ColumnOutOfBounds {
+                    index: *idx as usize,
+                    column_count: row.len(),
+                })
+        }
 
         Expr::Unary { op, expr } => {
             let v = eval_expr(expr, row)?;
@@ -42,7 +48,6 @@ fn eval_unary(op: UnaryOp, v: Value) -> ExecResult<Value> {
 fn eval_binary(op: BinaryOp, l: Value, r: Value) -> ExecResult<Value> {
     use BinaryOp::*;
 
-    // SQL NULL propagation
     if matches!(l, Value::Null) || matches!(r, Value::Null) {
         return Ok(Value::Null);
     }
@@ -73,3 +78,4 @@ fn eval_binary(op: BinaryOp, l: Value, r: Value) -> ExecResult<Value> {
         }),
     }
 }
+

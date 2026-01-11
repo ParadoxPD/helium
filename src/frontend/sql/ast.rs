@@ -30,6 +30,7 @@ pub struct SelectStmt {
     pub where_clause: Option<Expr>,
     pub order_by: Vec<OrderByExpr>,
     pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

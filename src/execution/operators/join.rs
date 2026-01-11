@@ -6,9 +6,9 @@ use crate::ir::expr::Expr;
 use crate::ir::plan::JoinType;
 use crate::types::value::Value;
 
-pub struct JoinExecutor<'a> {
-    left: Box<dyn Executor<'a>>,
-    right: Box<dyn Executor<'a>>,
+pub struct JoinExecutor {
+    left: Box<dyn Executor>,
+    right: Box<dyn Executor>,
     on: Expr,
     join_type: JoinType,
 
@@ -17,10 +17,10 @@ pub struct JoinExecutor<'a> {
     right_pos: usize,
 }
 
-impl<'a> JoinExecutor<'a> {
+impl JoinExecutor {
     pub fn new(
-        left: Box<dyn Executor<'a>>,
-        right: Box<dyn Executor<'a>>,
+        left: Box<dyn Executor>,
+        right: Box<dyn Executor>,
         on: Expr,
         join_type: JoinType,
     ) -> Self {
@@ -36,8 +36,8 @@ impl<'a> JoinExecutor<'a> {
     }
 }
 
-impl<'a> Executor<'a> for JoinExecutor<'a> {
-    fn open(&mut self, ctx: &ExecutionContext) -> ExecResult<()> {
+impl Executor for JoinExecutor {
+    fn open(&mut self, ctx: &mut ExecutionContext) -> ExecResult<()> {
         self.right_buf.clear();
         self.left_row = None;
         self.right_pos = 0;
@@ -52,7 +52,7 @@ impl<'a> Executor<'a> for JoinExecutor<'a> {
         Ok(())
     }
 
-    fn next(&mut self, ctx: &ExecutionContext) -> ExecResult<Option<Row>> {
+    fn next(&mut self, ctx: &mut ExecutionContext) -> ExecResult<Option<Row>> {
         loop {
             if self.left_row.is_none() {
                 self.left_row = self.left.next(ctx)?;
@@ -88,7 +88,7 @@ impl<'a> Executor<'a> for JoinExecutor<'a> {
         }
     }
 
-    fn close(&mut self, ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
+    fn close(&mut self, ctx: &mut ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
         self.right_buf.clear();
         self.left.close(ctx)?;
         self.right.close(ctx)?;

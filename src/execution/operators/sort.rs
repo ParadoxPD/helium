@@ -7,15 +7,15 @@ use crate::execution::executor::{ExecResult, Executor, Row};
 use crate::ir::plan::SortKey;
 use crate::types::value::Value;
 
-pub struct SortExecutor<'a> {
-    input: Box<dyn Executor<'a>>,
+pub struct SortExecutor {
+    input: Box<dyn Executor>,
     keys: Vec<SortKey>,
     buffer: Vec<Row>,
     pos: usize,
 }
 
-impl<'a> SortExecutor<'a> {
-    pub fn new(input: Box<dyn Executor<'a>>, keys: Vec<SortKey>) -> Self {
+impl SortExecutor {
+    pub fn new(input: Box<dyn Executor>, keys: Vec<SortKey>) -> Self {
         Self {
             input,
             keys,
@@ -25,8 +25,8 @@ impl<'a> SortExecutor<'a> {
     }
 }
 
-impl<'a> Executor<'a> for SortExecutor<'a> {
-    fn open(&mut self, ctx: &ExecutionContext) -> ExecResult<()> {
+impl Executor for SortExecutor {
+    fn open(&mut self, ctx: &mut ExecutionContext) -> ExecResult<()> {
         self.buffer.clear();
         self.pos = 0;
         self.input.open(ctx)?;
@@ -41,7 +41,7 @@ impl<'a> Executor<'a> for SortExecutor<'a> {
         Ok(())
     }
 
-    fn next(&mut self, _ctx: &ExecutionContext) -> ExecResult<Option<Row>> {
+    fn next(&mut self, _ctx: &mut ExecutionContext) -> ExecResult<Option<Row>> {
         if self.pos >= self.buffer.len() {
             return Ok(None);
         }
@@ -51,7 +51,7 @@ impl<'a> Executor<'a> for SortExecutor<'a> {
         Ok(Some(row))
     }
 
-    fn close(&mut self, ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
+    fn close(&mut self, ctx: &mut ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
         self.buffer.clear();
         self.pos = 0;
         self.input.close(ctx)

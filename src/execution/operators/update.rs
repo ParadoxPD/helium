@@ -28,13 +28,13 @@ impl UpdateExecutor {
     }
 }
 
-impl<'a> Executor<'a> for UpdateExecutor {
-    fn open(&mut self, _ctx: &ExecutionContext) -> ExecResult<()> {
+impl Executor for UpdateExecutor {
+    fn open(&mut self, _ctx: &mut ExecutionContext) -> ExecResult<()> {
         self.done = false;
         Ok(())
     }
 
-    fn next(&mut self, _ctx: &ExecutionContext) -> ExecResult<Option<Row>> {
+    fn next(&mut self, _ctx: &mut ExecutionContext) -> ExecResult<Option<Row>> {
         // UPDATE produces no rows
         if self.done {
             Ok(None)
@@ -44,7 +44,7 @@ impl<'a> Executor<'a> for UpdateExecutor {
         }
     }
 
-    fn close(&mut self, _ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
+    fn close(&mut self, _ctx: &mut ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
         // Actual UPDATE is performed by engine
         Ok(vec![])
     }

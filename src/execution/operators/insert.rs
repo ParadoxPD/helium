@@ -4,7 +4,6 @@ use crate::execution::errors::{ExecutionError, TableMutationStats};
 use crate::execution::eval_expr::eval_expr;
 use crate::execution::executor::{ExecResult, Executor, Row};
 use crate::ir::expr::Expr;
-use crate::storage::heap::heap_table::HeapTable;
 use crate::storage::index::btree::key::IndexKey;
 
 pub struct InsertExecutor {
@@ -25,25 +24,25 @@ impl InsertExecutor {
     }
 }
 
-impl<'a> Executor<'a> for InsertExecutor {
-    fn open(&mut self, _ctx: &ExecutionContext) -> ExecResult<()> {
+impl Executor for InsertExecutor {
+    fn open(&mut self, _ctx: &mut ExecutionContext) -> ExecResult<()> {
         self.pos = 0;
         Ok(())
     }
 
-    fn next(&mut self, ctx: &ExecutionContext) -> ExecResult<Option<Row>> {
+    fn next(&mut self, ctx: &mut ExecutionContext) -> ExecResult<Option<Row>> {
         if self.pos >= self.rows.len() {
             return Ok(None);
         }
 
-        let table_meta =
+        let _table_meta =
             ctx.catalog
                 .get_table_by_id(self.table_id)
                 .ok_or(ExecutionError::TableNotFound {
                     table_id: self.table_id,
                 })?;
 
-        let heap = HeapTable::open(table_meta.id, ctx.buffer_pool.clone());
+        let heap = ctx.get_heap(self.table_id)?;
         let exprs = &self.rows[self.pos];
         self.pos += 1;
 
@@ -53,7 +52,6 @@ impl<'a> Executor<'a> for InsertExecutor {
         }
 
         let rid = heap.insert(values.clone())?;
-        self.stats.rows_inserted += 1;
         self.stats.rows_affected += 1;
 
         for idx in ctx.catalog.indexes_for_table(self.table_id) {
@@ -72,7 +70,8 @@ impl<'a> Executor<'a> for InsertExecutor {
         Ok(None)
     }
 
-    fn close(&mut self, _ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
+    fn close(&mut self, _ctx: &mut ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
         Ok(vec![self.stats.clone()])
     }
 }
+

@@ -1,9 +1,7 @@
-use crate::api::errors::{DefinitionResult, MutationKind, MutationResult, QueryResult};
+use crate::api::errors::{MutationKind, MutationResult, QueryResult};
 use crate::execution::context::ExecutionContext;
-use crate::execution::errors::{
-    ExecutionError, ExecutionResult, ExecutionResultType, TableMutationStats,
-};
-use crate::execution::executor::{ExecResult, Executor, Row};
+use crate::execution::errors::{ExecutionError, ExecutionResult, ExecutionResultType};
+use crate::execution::executor::{ExecResult, Executor};
 use crate::execution::operators::delete::DeleteExecutor;
 use crate::execution::operators::filter::FilterExecutor;
 use crate::execution::operators::index_scan::IndexScanExecutor;
@@ -15,13 +13,9 @@ use crate::execution::operators::scan::ScanExecutor;
 use crate::execution::operators::sort::SortExecutor;
 use crate::execution::operators::update::UpdateExecutor;
 use crate::ir::plan::LogicalPlan;
-use crate::storage::heap::heap_table::HeapTable;
 
 pub fn execute_plan(plan: LogicalPlan, ctx: &mut ExecutionContext) -> ExecutionResultType {
     match plan {
-        // -------------------------
-        // QUERY
-        // -------------------------
         LogicalPlan::Scan { .. }
         | LogicalPlan::Filter { .. }
         | LogicalPlan::Project { .. }
@@ -30,24 +24,14 @@ pub fn execute_plan(plan: LogicalPlan, ctx: &mut ExecutionContext) -> ExecutionR
         | LogicalPlan::Join { .. }
         | LogicalPlan::IndexScan { .. } => execute_query(plan, ctx),
 
-        // -------------------------
-        // DML
-        // -------------------------
         LogicalPlan::Insert { .. } | LogicalPlan::Update { .. } | LogicalPlan::Delete { .. } => {
             execute_mutation(plan, ctx)
         }
-
-        // -------------------------
-        // DDL (future)
-        // -------------------------
-        _ => Err(ExecutionError::InvalidPlan {
-            reason: "unsupported plan type".into(),
-        }),
     }
 }
 
 pub fn execute_query(plan: LogicalPlan, ctx: &mut ExecutionContext) -> ExecutionResultType {
-    let schema = plan.output_schema(&ctx.catalog)?;
+    let schema = plan_output_schema(&plan, &ctx.catalog)?;
 
     let mut root = build_executor(plan, ctx)?;
     root.open(ctx)?;
@@ -59,7 +43,6 @@ pub fn execute_query(plan: LogicalPlan, ctx: &mut ExecutionContext) -> Execution
         rows.push(row);
     }
 
-    // Query executors return empty mutation stats
     let _ = root.close(ctx)?;
 
     Ok(ExecutionResult::Query(QueryResult {
@@ -80,7 +63,6 @@ pub fn execute_mutation(plan: LogicalPlan, ctx: &mut ExecutionContext) -> Execut
     let mut exec = build_executor(plan, ctx)?;
     exec.open(ctx)?;
 
-    // Drain executor (mutations usually return no rows)
     while exec.next(ctx)?.is_some() {}
 
     let per_table = exec.close(ctx)?;
@@ -95,10 +77,10 @@ pub fn execute_mutation(plan: LogicalPlan, ctx: &mut ExecutionContext) -> Execut
     }))
 }
 
-pub fn build_executor(plan: LogicalPlan, ctx: &ExecutionContext) -> ExecResult<Box<dyn Executor>> {
-    let table_meta = ctx.catalog.get_table_by_id(table_id)?;
-    let heap = HeapTable::open(table_meta.id, ctx.buffer_pool.clone());
-
+pub fn build_executor(
+    plan: LogicalPlan,
+    ctx: &mut ExecutionContext,
+) -> ExecResult<Box<dyn Executor>> {
     Ok(match plan {
         LogicalPlan::Scan { table_id } => Box::new(ScanExecutor::new(table_id)),
 
@@ -107,7 +89,7 @@ pub fn build_executor(plan: LogicalPlan, ctx: &ExecutionContext) -> ExecResult<B
             index_id,
             predicate,
         } => {
-            let table = ctx
+            let _table = ctx
                 .catalog
                 .get_table_by_id(table_id)
                 .ok_or(ExecutionError::TableNotFound { table_id })?;
@@ -117,7 +99,9 @@ pub fn build_executor(plan: LogicalPlan, ctx: &ExecutionContext) -> ExecResult<B
                 .get_index_by_id(index_id)
                 .ok_or(ExecutionError::IndexNotFound { index_id })?;
 
-            Box::new(IndexScanExecutor::new(heap, index.index.clone(), predicate))
+            let heap = ctx.get_heap(table_id)?;
+
+            Box::new(IndexScanExecutor::new(index.index.clone(), heap, predicate))
         }
 
         LogicalPlan::Filter { input, predicate } => {
@@ -154,9 +138,6 @@ pub fn build_executor(plan: LogicalPlan, ctx: &ExecutionContext) -> ExecResult<B
             join_type,
         )),
 
-        // -------------------------
-        // DML AS EXECUTORS
-        // -------------------------
         LogicalPlan::Insert { table_id, rows } => Box::new(InsertExecutor::new(table_id, rows)),
 
         LogicalPlan::Update {
@@ -171,3 +152,49 @@ pub fn build_executor(plan: LogicalPlan, ctx: &ExecutionContext) -> ExecResult<B
         } => Box::new(DeleteExecutor::new(table_id, predicate)),
     })
 }
+
+fn plan_output_schema(
+    plan: &LogicalPlan,
+    catalog: &crate::catalog::catalog::Catalog,
+) -> ExecResult<crate::types::schema::Schema> {
+    use crate::types::schema::Schema;
+
+    match plan {
+        LogicalPlan::Scan { table_id } => {
+            let table =
+                catalog
+                    .get_table_by_id(*table_id)
+                    .ok_or(ExecutionError::TableNotFound {
+                        table_id: *table_id,
+                    })?;
+            Ok(table.schema.clone())
+        }
+
+        LogicalPlan::Project { input: _, exprs } => {
+            let mut schema = Schema::new();
+            for (idx, _expr) in exprs.iter().enumerate() {
+                use crate::catalog::column::ColumnMeta;
+                use crate::catalog::ids::ColumnId;
+                use crate::types::datatype::DataType;
+
+                schema.push(ColumnMeta {
+                    id: ColumnId(idx as u32),
+                    name: format!("col_{}", idx),
+                    data_type: DataType::Int64,
+                    nullable: true,
+                });
+            }
+            Ok(schema)
+        }
+
+        LogicalPlan::Filter { input, .. }
+        | LogicalPlan::Sort { input, .. }
+        | LogicalPlan::Limit { input, .. } => plan_output_schema(input, catalog),
+
+        _ => {
+            let schema = Schema::new();
+            Ok(schema)
+        }
+    }
+}
+

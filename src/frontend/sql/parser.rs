@@ -253,12 +253,29 @@ impl Parser {
         } else {
             None
         };
+
+        let offset = if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("offset")) {
+            self.next();
+            match self.next() {
+                Token::Int(n) => Some(*n as usize),
+                t => {
+                    return Err(ParseError::UnexpectedToken {
+                        token: t.clone(),
+                        position: self.current_position(),
+                    });
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(SelectStmt {
             columns,
             from,
             where_clause,
             order_by,
             limit,
+            offset,
         })
     }
     fn parse_order_by(&mut self) -> Result<Vec<OrderByExpr>, ParseError> {

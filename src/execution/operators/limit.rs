@@ -2,16 +2,16 @@ use crate::execution::context::ExecutionContext;
 use crate::execution::errors::TableMutationStats;
 use crate::execution::executor::{ExecResult, Executor, Row};
 
-pub struct LimitExecutor<'a> {
-    input: Box<dyn Executor<'a>>,
+pub struct LimitExecutor {
+    input: Box<dyn Executor>,
     limit: u64,
     offset: u64,
     seen: u64,
     produced: u64,
 }
 
-impl<'a> LimitExecutor<'a> {
-    pub fn new(input: Box<dyn Executor<'a>>, limit: u64, offset: u64) -> Self {
+impl LimitExecutor {
+    pub fn new(input: Box<dyn Executor>, limit: u64, offset: u64) -> Self {
         Self {
             input,
             limit,
@@ -22,14 +22,14 @@ impl<'a> LimitExecutor<'a> {
     }
 }
 
-impl<'a> Executor<'a> for LimitExecutor<'a> {
-    fn open(&mut self, ctx: &ExecutionContext) -> ExecResult<()> {
+impl Executor for LimitExecutor {
+    fn open(&mut self, ctx: &mut ExecutionContext) -> ExecResult<()> {
         self.seen = 0;
         self.produced = 0;
         self.input.open(ctx)
     }
 
-    fn next(&mut self, ctx: &ExecutionContext) -> ExecResult<Option<Row>> {
+    fn next(&mut self, ctx: &mut ExecutionContext) -> ExecResult<Option<Row>> {
         if self.produced >= self.limit {
             return Ok(None);
         }
@@ -47,7 +47,7 @@ impl<'a> Executor<'a> for LimitExecutor<'a> {
         Ok(None)
     }
 
-    fn close(&mut self, ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
+    fn close(&mut self, ctx: &mut ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
         self.input.close(ctx)
     }
 }

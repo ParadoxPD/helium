@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::{
+    catalog::ids::TableId,
     storage::{
         buffer::pool::BufferPoolHandle,
         errors::StorageResult,
@@ -13,6 +14,7 @@ use crate::{
 pub struct HeapTable {
     pub(crate) pages: Mutex<Vec<PageId>>,
     page_capacity: usize,
+    pub(crate) table_id: TableId,
     pub(crate) bp: BufferPoolHandle,
 }
 
@@ -26,16 +28,25 @@ impl HeapTable {
             let page = RowPage::new(pid, page_capacity);
             let frame = bp.fetch_page(pid)?;
             page.write_bytes(&mut frame.data);
-            bp.unpin_page(pid, true);
+            bp.unpin_page(pid, true)?;
         }
 
         Ok(Self {
+            table_id: TableId(0), // Will be set properly when opened
             pages: Mutex::new(vec![pid]),
             page_capacity,
             bp,
         })
     }
 
+    // ADD THIS METHOD
+    pub fn open(table_id: TableId, bp: BufferPoolHandle) -> StorageResult<Self> {
+        // For now, create a new heap since we don't have persistence yet
+        // In Phase 2, this will load pages from catalog metadata
+        let mut heap = Self::new(100, bp)?;
+        heap.table_id = table_id;
+        Ok(heap)
+    }
     /// Insert a single physical row.
     pub fn insert(&self, values: Vec<Value>) -> StorageResult<RowId> {
         let last_pid = {

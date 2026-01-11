@@ -276,4 +276,81 @@ impl<'a> Binder<'a> {
         }
         Ok(())
     }
+
+    fn bind_create_table(&self, stmt: CreateTableStmt) -> Result<BoundCreateTable, BindError> {
+        use crate::types::datatype::DataType;
+        use crate::types::schema::Schema;
+
+        if stmt.columns.is_empty() {
+            return Err(BindError::EmptyTable);
+        }
+
+        let mut schema = Schema::new();
+
+        for col_def in stmt.columns {
+            let data_type = match col_def.ty {
+                SqlType::Int => DataType::Int64,
+                SqlType::Bool => DataType::Boolean,
+                SqlType::Text => DataType::Varchar { max_len: None },
+            };
+
+            // We'll assign column IDs later in the catalog
+            use crate::catalog::column::ColumnMeta;
+            use crate::catalog::ids::ColumnId;
+
+            schema.push(ColumnMeta {
+                id: ColumnId(0), // placeholder
+                name: col_def.name,
+                data_type,
+                nullable: col_def.nullable,
+            });
+        }
+
+        Ok(BoundCreateTable {
+            table_name: stmt.table_name,
+            schema,
+        })
+    }
+
+    fn bind_drop_table(&self, stmt: DropTableStmt) -> Result<BoundDropTable, BindError> {
+        let table = self
+            .catalog
+            .get_table_by_name(&stmt.table_name)
+            .ok_or_else(|| BindError::UnknownTable(stmt.table_name.clone()))?;
+
+        Ok(BoundDropTable { table_id: table.id })
+    }
+
+    fn bind_create_index(
+        &self,
+        name: String,
+        table: String,
+        column: String,
+    ) -> Result<BoundCreateIndex, BindError> {
+        let table_meta = self
+            .catalog
+            .get_table_by_name(&table)
+            .ok_or_else(|| BindError::UnknownTable(table.clone()))?;
+
+        let col = table_meta
+            .schema
+            .column_named(&column)
+            .ok_or_else(|| BindError::UnknownColumn(column.clone()))?;
+
+        Ok(BoundCreateIndex {
+            name,
+            table_id: table_meta.id,
+            column_id: col.id,
+        })
+    }
+
+    fn bind_drop_index(&self, name: String) -> Result<BoundDropIndex, BindError> {
+        let index = self
+            .catalog
+            .get_index_by_name(&name)
+            .ok_or_else(|| BindError::NotImplemented(format!("index '{}' not found", name)))?;
+        Ok(BoundDropIndex {
+            index_id: index.meta.id,
+        })
+    }
 }

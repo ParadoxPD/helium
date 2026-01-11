@@ -1,3 +1,5 @@
+use core::fmt;
+
 use crate::{
     api::errors::{DefinitionResult, MutationResult, QueryResult},
     binder::bound::BoundExpr,
@@ -69,6 +71,45 @@ pub struct IndexMutationStats {
 
     /// Number of index entries removed
     pub entries_deleted: u64,
+}
+
+impl TableMutationStats {
+    pub fn new(table_id: TableId) -> Self {
+        Self {
+            table_id,
+            rows_affected: 0,
+            rows_written: 0,
+            rows_deleted: 0,
+            indexes_updated: 0,
+            per_index: Vec::new(),
+        }
+    }
+
+    pub fn record_index_insert(&mut self, index_id: IndexId) {
+        self.indexes_updated += 1;
+        if let Some(stats) = self.per_index.iter_mut().find(|s| s.index_id == index_id) {
+            stats.entries_inserted += 1;
+        } else {
+            self.per_index.push(IndexMutationStats {
+                index_id,
+                entries_inserted: 1,
+                entries_deleted: 0,
+            });
+        }
+    }
+
+    pub fn record_index_delete(&mut self, index_id: IndexId) {
+        self.indexes_updated += 1;
+        if let Some(stats) = self.per_index.iter_mut().find(|s| s.index_id == index_id) {
+            stats.entries_deleted += 1;
+        } else {
+            self.per_index.push(IndexMutationStats {
+                index_id,
+                entries_inserted: 0,
+                entries_deleted: 1,
+            });
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -155,8 +196,6 @@ impl ExecutionError {
     }
 }
 
-use std::fmt;
-
 impl fmt::Display for ExecutionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -190,11 +229,15 @@ impl fmt::Display for ExecutionError {
                 index, column_count
             ),
             ExecutionError::Storage(err) => write!(f, "storage error: {}", err),
-            ExecutionError::InvalidExpression { reason } => todo!(),
-            ExecutionError::DivisionByZero => todo!(),
-            ExecutionError::TypeMismatch { op, left, right } => todo!(),
-            ExecutionError::UnboundColumn => todo!(),
-            ExecutionError::Internal(_) => todo!(),
+            ExecutionError::InvalidExpression { reason } => {
+                write!(f, "invalid expression: {}", reason)
+            }
+            ExecutionError::DivisionByZero => write!(f, "division by zero"),
+            ExecutionError::TypeMismatch { op, left, right } => {
+                write!(f, "type mismatch in {}: {:?} and {:?}", op, left, right)
+            }
+            ExecutionError::UnboundColumn => write!(f, "unbound column reference"),
+            ExecutionError::Internal(msg) => write!(f, "internal error: {}", msg),
         }
     }
 }

@@ -1,11 +1,14 @@
-use helium::{
-    api::db::{Database, QueryResult},
-    debugger::{DebugLevel, set_debug_level},
-};
-use rustyline::{DefaultEditor, Result, error::ReadlineError};
-use std::process;
+use std::{error::Error, process};
 
-fn main() -> Result<()> {
+use rustyline::{DefaultEditor, error::ReadlineError};
+
+use crate::{
+    api::{db::Database, errors::QueryResult},
+    diagnostics::debugger::{DebugLevel, set_debug_level},
+    execution::errors::ExecutionResult,
+};
+
+pub fn run() {
     // ---------- Debug flags ----------
     let args: Vec<String> = std::env::args().collect();
     let debug_level = args
@@ -19,7 +22,7 @@ fn main() -> Result<()> {
     set_debug_level(debug_level);
 
     // ---------- Database ----------
-    let mut db = Database::new("/tmp/test.db".to_string());
+    let mut db = Database::new("/tmp/test.db".to_string()).unwrap(); //TODO: Fix this unwrap
 
     println!("Helium DB CLI");
     println!("Type SQL. End with ';'.");
@@ -27,11 +30,11 @@ fn main() -> Result<()> {
     println!("---------------------");
 
     // ---------- Line editor ----------
-    let mut rl = DefaultEditor::new()?;
+    let mut rl = DefaultEditor::new().unwrap(); //TODO: Fix this unwrap
 
     let mut buffer = String::new();
 
-    Ok(loop {
+    loop {
         let prompt = if buffer.is_empty() {
             "helium> "
         } else {
@@ -61,17 +64,15 @@ fn main() -> Result<()> {
                 rl.add_history_entry(buffer.clone()).ok();
 
                 // ---------- Execute SQL ----------
-                match db.query(&buffer) {
-                    Ok(QueryResult::Rows(rows)) => {
-                        for row in rows {
-                            println!("{row:?}");
-                        }
+                match db.execute(&buffer) {
+                    Ok(ExecutionResult::Query(res)) => {
+                        println!("{:?}", res);
                     }
-                    Ok(QueryResult::Explain(plan)) => {
-                        println!("{plan}");
+                    Ok(ExecutionResult::Mutation(res)) => {
+                        println!("{:?}", res);
                     }
-                    Ok(QueryResult::Ok(message)) => {
-                        println!("{message}");
+                    Ok(ExecutionResult::Definition(res)) => {
+                        println!("{:?}", res);
                     }
                     Err(err) => {
                         eprintln!("Error: {err}");
@@ -96,7 +97,7 @@ fn main() -> Result<()> {
                 break;
             }
         }
-    })
+    }
 }
 
 fn handle_meta_command(cmd: &str) -> bool {

@@ -50,11 +50,13 @@ impl fmt::Display for BindError {
                 column, expected, found
             ),
             BindError::TypeMismatchBinary { op, left, right } => {
-                write!(f, "{} {} {}", op, left, right)
+                write!(f, "type mismatch in {}: {} and {}", op, left, right)
             }
-            BindError::TypeMismatchUnary { op, found } => todo!(),
-            BindError::EmptyProject => todo!(),
-            BindError::NotImplemented(_) => todo!(),
+            BindError::TypeMismatchUnary { op, found } => {
+                write!(f, "type mismatch in {}: found {}", op, found)
+            }
+            BindError::EmptyProject => write!(f, "projection list cannot be empty"),
+            BindError::NotImplemented(msg) => write!(f, "not implemented: {}", msg),
         }
     }
 }

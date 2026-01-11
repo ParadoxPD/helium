@@ -1,6 +1,7 @@
 pub mod api;
 pub mod binder;
 pub mod catalog;
+pub mod cli;
 pub mod diagnostics;
 pub mod execution;
 pub mod frontend;

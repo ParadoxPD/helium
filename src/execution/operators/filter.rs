@@ -5,23 +5,23 @@ use crate::execution::executor::{ExecResult, Executor, Row};
 use crate::ir::expr::Expr;
 use crate::types::value::Value;
 
-pub struct FilterExecutor<'a> {
-    input: Box<dyn Executor<'a>>,
+pub struct FilterExecutor {
+    input: Box<dyn Executor>,
     predicate: Expr,
 }
 
-impl<'a> FilterExecutor<'a> {
-    pub fn new(input: Box<dyn Executor<'a>>, predicate: Expr) -> Self {
+impl FilterExecutor {
+    pub fn new(input: Box<dyn Executor>, predicate: Expr) -> Self {
         Self { input, predicate }
     }
 }
 
-impl<'a> Executor<'a> for FilterExecutor<'a> {
-    fn open(&mut self, ctx: &ExecutionContext) -> ExecResult<()> {
+impl Executor for FilterExecutor {
+    fn open(&mut self, ctx: &mut ExecutionContext) -> ExecResult<()> {
         self.input.open(ctx)
     }
 
-    fn next(&mut self, ctx: &ExecutionContext) -> ExecResult<Option<Row>> {
+    fn next(&mut self, ctx: &mut ExecutionContext) -> ExecResult<Option<Row>> {
         while let Some(row) = self.input.next(ctx)? {
             match eval_expr(&self.predicate, &row)? {
                 Value::Boolean(true) => return Ok(Some(row)),
@@ -39,7 +39,7 @@ impl<'a> Executor<'a> for FilterExecutor<'a> {
         Ok(None)
     }
 
-    fn close(&mut self, ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
+    fn close(&mut self, ctx: &mut ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
         self.input.close(ctx)
     }
 }

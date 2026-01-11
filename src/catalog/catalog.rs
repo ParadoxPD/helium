@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::catalog::column::ColumnMeta;
 use crate::catalog::errors::CatalogError;
@@ -9,9 +9,15 @@ use crate::catalog::table::TableMeta;
 use crate::storage::buffer::pool::{BufferPool, BufferPoolHandle};
 use crate::storage::index::btree::BTreeIndex;
 use crate::storage::index::btree::disk::BPlusTree;
+use crate::storage::index::index::Index;
 use crate::storage::pagemgr::file::FilePageManager;
 use crate::types::datatype::DataType;
 use crate::types::schema::Schema;
+
+#[derive(Debug, Clone)]
+pub struct TableStats {
+    pub row_count: u64,
+}
 
 pub struct Catalog {
     next_table_id: u32,
@@ -68,7 +74,9 @@ impl Catalog {
         let meta = TableMeta {
             id: table_id,
             name: name.clone(),
-            schema: schema,
+            schema,
+            root_page: None,       // ADD THIS
+            index_ids: Vec::new(), // ADD THIS
         };
 
         self.tables_by_name.insert(name, table_id);
@@ -77,6 +85,12 @@ impl Catalog {
         Ok(table_id)
     }
 
+    // Add method to register index with table
+    pub fn register_index_with_table(&mut self, table_id: TableId, index_id: IndexId) {
+        if let Some(table) = self.tables_by_id.get_mut(&table_id) {
+            table.index_ids.push(index_id);
+        }
+    }
     pub fn get_table_by_id(&self, id: TableId) -> Option<&TableMeta> {
         self.tables_by_id.get(&id)
     }
@@ -95,6 +109,7 @@ impl Catalog {
         table_id: TableId,
         column_ids: Vec<ColumnId>,
         unique: bool,
+        bp: BufferPoolHandle,
     ) -> Result<IndexId, CatalogError> {
         if self.indexes_by_name.contains_key(&name) {
             return Err(CatalogError::IndexExists(name));
@@ -111,12 +126,32 @@ impl Catalog {
             unique,
         };
 
+        // Create the actual B+Tree index
+        let tree = BPlusTree::new(100, bp)?; // order = 100
+        let index = Arc::new(Mutex::new(BTreeIndex::new(tree)));
+
+        let entry = IndexEntry { meta, index };
+
         self.indexes_by_name.insert(name, index_id);
         self.indexes_by_id.insert(index_id, entry);
 
         Ok(index_id)
     }
 
+    // Add this method for getting index by name
+    pub fn get_index_by_name(&self, name: &str) -> Option<&IndexEntry> {
+        self.indexes_by_name
+            .get(name)
+            .and_then(|id| self.indexes_by_id.get(id))
+    }
+
+    // Add this method for table statistics (needed by optimizer)
+    pub fn table_stats(&self, table_id: TableId) -> TableStats {
+        // For now, return dummy stats. In Phase 2, this will be persisted
+        TableStats {
+            row_count: 1000, // placeholder
+        }
+    }
     pub fn get_index_by_id(&self, id: IndexId) -> Option<&IndexEntry> {
         self.indexes_by_id.get(&id)
     }

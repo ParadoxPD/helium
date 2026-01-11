@@ -33,8 +33,8 @@ impl IndexScanExecutor {
     }
 }
 
-impl<'a> Executor<'a> for IndexScanExecutor {
-    fn open(&mut self, ctx: &ExecutionContext) -> ExecResult<()> {
+impl Executor for IndexScanExecutor {
+    fn open(&mut self, ctx: &mut ExecutionContext) -> ExecResult<()> {
         self.pos = 0;
         ctx.stats.index_lookups += 1;
 
@@ -46,8 +46,10 @@ impl<'a> Executor<'a> for IndexScanExecutor {
                 idx.get(&k)?
             }
             IndexPredicate::Range { low, high } => {
-                let l = IndexKey::try_from(low)?;
-                let h = IndexKey::try_from(high)?;
+                let l = IndexKey::try_from(low)
+                    .map_err(|e| ExecutionError::InvalidExpression { reason: e.into() })?;
+                let h = IndexKey::try_from(high)
+                    .map_err(|e| ExecutionError::InvalidExpression { reason: e.into() })?;
                 idx.range(&l, &h)?
             }
         };
@@ -55,7 +57,7 @@ impl<'a> Executor<'a> for IndexScanExecutor {
         Ok(())
     }
 
-    fn next(&mut self, _ctx: &ExecutionContext) -> ExecResult<Option<Row>> {
+    fn next(&mut self, _ctx: &mut ExecutionContext) -> ExecResult<Option<Row>> {
         if self.pos >= self.rids.len() {
             return Ok(None);
         }
@@ -67,8 +69,9 @@ impl<'a> Executor<'a> for IndexScanExecutor {
         Ok(Some(row.values.clone()))
     }
 
-    fn close(&mut self, _ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
+    fn close(&mut self, _ctx: &mut ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
         self.rids.clear();
         Ok(vec![])
     }
 }
+

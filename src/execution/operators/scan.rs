@@ -1,59 +1,69 @@
 use crate::{
     catalog::ids::TableId,
-    db_trace,
-    diagnostics::debugger::Component,
     execution::{
         context::ExecutionContext,
         errors::{ExecutionError, TableMutationStats},
         executor::{ExecResult, Executor, Row},
     },
-    storage::heap::{heap_cursor::HeapCursor, heap_table::HeapTable},
+    storage::heap::heap_cursor::HeapCursor,
 };
+use std::sync::Arc;
 
-pub struct ScanExecutor<'a> {
+pub struct ScanExecutor {
     table_id: TableId,
-    cursor: Option<HeapCursor<'a>>,
+    heap: Option<Arc<crate::storage::heap::heap_table::HeapTable>>,
+    position: usize,
+    rows: Vec<Row>,
 }
 
-impl<'a> ScanExecutor<'a> {
+impl ScanExecutor {
     pub fn new(table_id: TableId) -> Self {
         Self {
             table_id,
-            cursor: None,
+            heap: None,
+            position: 0,
+            rows: Vec::new(),
         }
     }
 }
 
-impl<'a> Executor<'a> for ScanExecutor<'a> {
-    fn open(&mut self, ctx: &ExecutionContext) -> ExecResult<()> {
-        let table_meta =
+impl Executor for ScanExecutor {
+    fn open(&mut self, ctx: &mut ExecutionContext) -> ExecResult<()> {
+        let _table_meta =
             ctx.catalog
                 .get_table_by_id(self.table_id)
                 .ok_or(ExecutionError::TableNotFound {
                     table_id: self.table_id,
                 })?;
 
-        let heap = HeapTable::open(table_meta.id, ctx.buffer_pool.clone());
-        self.cursor = Some(heap.scan()?);
+        let heap = ctx.get_heap(self.table_id)?;
+
+        // Materialize all rows during open
+        self.rows.clear();
+        for (_rid, row) in heap.scan() {
+            self.rows.push(row.values.clone());
+        }
+
+        self.heap = Some(heap);
+        self.position = 0;
         Ok(())
     }
 
-    fn next(&mut self, ctx: &'a ExecutionContext) -> ExecResult<Option<Row>> {
-        let cursor = self.cursor.as_mut().ok_or(ExecutionError::Internal(
-            "scan cursor not initialized".into(),
-        ))?;
-
-        match cursor.next() {
-            Some((_rid, row)) => {
-                ctx.stats.rows_scanned += 1;
-                Ok(Some(row.values.clone()))
-            }
-            None => Ok(None),
+    fn next(&mut self, ctx: &mut ExecutionContext) -> ExecResult<Option<Row>> {
+        if self.position >= self.rows.len() {
+            return Ok(None);
         }
+
+        let row = self.rows[self.position].clone();
+        self.position += 1;
+        ctx.stats.rows_scanned += 1;
+        Ok(Some(row))
     }
 
-    fn close(&mut self, _ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
-        self.cursor = None;
+    fn close(&mut self, _ctx: &mut ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
+        self.heap = None;
+        self.rows.clear();
         Ok(vec![])
     }
 }
+

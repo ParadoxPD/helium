@@ -7,14 +7,13 @@ use crate::{
         executor::{ExecResult, Executor, Row},
     },
     ir::expr::Expr,
-    storage::{heap::heap_table::HeapTable, index::btree::key::IndexKey},
+    storage::index::btree::key::IndexKey,
     types::value::Value,
 };
 
 pub struct DeleteExecutor {
     table_id: TableId,
     predicate: Option<Expr>,
-
     done: bool,
     stats: TableMutationStats,
 }
@@ -30,31 +29,32 @@ impl DeleteExecutor {
     }
 }
 
-impl<'a> Executor<'a> for DeleteExecutor {
-    fn open(&mut self, _ctx: &ExecutionContext) -> ExecResult<()> {
+impl Executor for DeleteExecutor {
+    fn open(&mut self, _ctx: &mut ExecutionContext) -> ExecResult<()> {
         self.done = false;
         Ok(())
     }
 
-    fn next(&mut self, ctx: &ExecutionContext) -> ExecResult<Option<Row>> {
+    fn next(&mut self, ctx: &mut ExecutionContext) -> ExecResult<Option<Row>> {
         if self.done {
             return Ok(None);
         }
 
         self.done = true;
 
-        let table_meta =
+        let _table_meta =
             ctx.catalog
                 .get_table_by_id(self.table_id)
                 .ok_or(ExecutionError::TableNotFound {
                     table_id: self.table_id,
                 })?;
-        let heap = HeapTable::open(table_meta.id, ctx.buffer_pool.clone());
-        let mut cursor = heap.scan()?;
+
+        let heap = ctx.get_heap(self.table_id)?;
+        let cursor = heap.scan();
 
         let mut to_delete = Vec::new();
 
-        while let Some((rid, row)) = cursor.next()? {
+        for (rid, row) in cursor {
             if let Some(pred) = &self.predicate {
                 match eval_expr(pred, &row.values)? {
                     Value::Boolean(true) => {}
@@ -65,7 +65,6 @@ impl<'a> Executor<'a> for DeleteExecutor {
         }
 
         for (rid, old_row) in to_delete {
-            // index maintenance
             for idx in ctx.catalog.indexes_for_table(self.table_id) {
                 let col = idx.meta.column_ids[0];
                 let key = IndexKey::try_from(&old_row[col.0 as usize]).map_err(|e| {
@@ -87,7 +86,8 @@ impl<'a> Executor<'a> for DeleteExecutor {
         Ok(None)
     }
 
-    fn close(&mut self, _ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
+    fn close(&mut self, _ctx: &mut ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
         Ok(vec![self.stats.clone()])
     }
 }
+

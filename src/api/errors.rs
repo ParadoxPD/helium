@@ -67,6 +67,7 @@ pub enum DbError {
     Optimize(OptimizerError),
     Execution(ExecutionError),
     Storage(StorageError),
+    EmptyQuery,
 }
 
 impl std::fmt::Display for DbError {
@@ -78,6 +79,7 @@ impl std::fmt::Display for DbError {
             DbError::Optimize(e) => write!(f, "optimizer error: {e}"),
             DbError::Execution(e) => write!(f, "execution error: {e}"),
             DbError::Storage(e) => write!(f, "storage error: {e}"),
+            DbError::EmptyQuery => write!(f, "Empty Query String"),
         }
     }
 }

@@ -2,24 +2,19 @@
 //!
 //! Schemas describe *shape*, not storage or ownership.
 
-use crate::types::datatype::DataType;
-
-pub type ColumnId = u16;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Column {
-    pub id: ColumnId,
-    pub name: String,
-    pub data_type: DataType,
-    pub nullable: bool,
-}
+use crate::catalog::{column::ColumnMeta, ids::ColumnId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schema {
-    pub columns: Vec<Column>,
+    pub columns: Vec<ColumnMeta>,
 }
 
 impl Schema {
+    pub fn new() -> Self {
+        Self {
+            columns: Vec::new(),
+        }
+    }
     /// Number of columns in the schema.
     #[inline]
     pub fn len(&self) -> usize {
@@ -32,7 +27,11 @@ impl Schema {
     }
 
     /// Lookup by column id.
-    pub fn column(&self, id: ColumnId) -> Option<&Column> {
+    pub fn column(&self, id: ColumnId) -> Option<&ColumnMeta> {
         self.columns.iter().find(|c| c.id == id)
+    }
+
+    pub fn push(&mut self, column: ColumnMeta) {
+        self.columns.push(column);
     }
 }

@@ -2,11 +2,9 @@ use std::collections::HashMap;
 
 use crate::{
     binder::{bind_stmt::Binder, errors::BindError},
+    catalog::{column::ColumnMeta, ids::ColumnId},
     frontend::sql::ast::FromItem,
-    types::{
-        datatype::DataType,
-        schema::{Column, ColumnId, Schema},
-    },
+    types::{datatype::DataType, schema::Schema},
 };
 
 impl Schema {
@@ -14,7 +12,7 @@ impl Schema {
         self.columns.iter().any(|c| c.name == name)
     }
 
-    pub fn column_named(&self, name: &str) -> Option<&Column> {
+    pub fn column_named(&self, name: &str) -> Option<&ColumnMeta> {
         self.columns.iter().find(|c| c.name == name)
     }
 
@@ -27,19 +25,37 @@ impl Schema {
 /// Maps visible column names to ColumnId + DataType.
 #[derive(Debug)]
 pub struct ColumnScope {
-    pub(crate) columns: HashMap<String, (ColumnId, DataType)>,
+    /// name -> (ColumnId, DataType)
+    columns: HashMap<String, Vec<(ColumnId, DataType)>>,
 }
 
 impl ColumnScope {
-    pub fn new(columns: HashMap<String, (ColumnId, DataType)>) -> Self {
-        Self { columns }
+    pub fn new() -> Self {
+        Self {
+            columns: HashMap::new(),
+        }
+    }
+
+    pub fn add_column(
+        &mut self,
+        name: String,
+        id: ColumnId,
+        ty: DataType,
+    ) -> Result<(), BindError> {
+        self.columns.entry(name).or_default().push((id, ty));
+        Ok(())
     }
 
     pub fn resolve(&self, name: &str) -> Result<(ColumnId, DataType), BindError> {
-        self.columns
-            .get(name)
-            .cloned()
-            .ok_or_else(|| BindError::UnknownColumn(name.to_string()))
+        match self.columns.get(name) {
+            None => Err(BindError::UnknownColumn(name.to_string())),
+            Some(cols) if cols.len() == 1 => Ok(cols[0].clone()),
+            Some(_) => Err(BindError::AmbiguousColumn(name.to_string())),
+        }
+    }
+
+    pub fn iter_columns(&self) -> impl Iterator<Item = (ColumnId, DataType)> + '_ {
+        self.columns.values().flat_map(|v| v.iter().cloned())
     }
 }
 
@@ -48,7 +64,7 @@ impl<'a> Binder<'a> {
         match from {
             FromItem::Table { name, alias } => {
                 let alias = alias.clone().unwrap_or_else(|| name.clone());
-                self.tables.insert(alias, name.clone());
+                self.catalog.insert(alias, name.clone());
             }
             FromItem::Join { left, right, .. } => {
                 self.collect_tables(left)?;

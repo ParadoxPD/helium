@@ -1,15 +1,17 @@
 use crate::catalog::ids::TableId;
 use crate::execution::context::ExecutionContext;
-use crate::execution::executor::{Executor, Row};
+use crate::execution::errors::{ExecutionError, TableMutationStats};
+use crate::execution::eval_expr::eval_expr;
+use crate::execution::executor::{ExecResult, Executor, Row};
 use crate::ir::expr::Expr;
+use crate::storage::heap::heap_table::HeapTable;
+use crate::storage::index::btree::key::IndexKey;
 
 pub struct InsertExecutor {
-    pub(crate) table_id: TableId,
-    pub(crate) rows: Vec<Vec<Expr>>,
-
-    // runtime
-    done: bool,
-    pub(crate) inserted: usize,
+    table_id: TableId,
+    rows: Vec<Vec<Expr>>,
+    pos: usize,
+    stats: TableMutationStats,
 }
 
 impl InsertExecutor {
@@ -17,31 +19,60 @@ impl InsertExecutor {
         Self {
             table_id,
             rows,
-            done: false,
-            inserted: 0,
+            pos: 0,
+            stats: TableMutationStats::new(table_id),
         }
     }
 }
 
-impl Executor for InsertExecutor {
-    fn open(&mut self, _ctx: &ExecutionContext) {
-        self.done = false;
-        self.inserted = 0;
+impl<'a> Executor<'a> for InsertExecutor {
+    fn open(&mut self, _ctx: &ExecutionContext) -> ExecResult<()> {
+        self.pos = 0;
+        Ok(())
     }
 
-    fn next(&mut self) -> Option<Row> {
-        if self.done {
-            return None;
+    fn next(&mut self, ctx: &ExecutionContext) -> ExecResult<Option<Row>> {
+        if self.pos >= self.rows.len() {
+            return Ok(None);
         }
 
-        self.done = true;
+        let table_meta =
+            ctx.catalog
+                .get_table_by_id(self.table_id)
+                .ok_or(ExecutionError::TableNotFound {
+                    table_id: self.table_id,
+                })?;
 
-        // NOTE:
-        // actual insertion happens in close()
-        None
+        let heap = HeapTable::open(table_meta.id, ctx.buffer_pool.clone());
+        let exprs = &self.rows[self.pos];
+        self.pos += 1;
+
+        let mut values = Vec::with_capacity(exprs.len());
+        for e in exprs {
+            values.push(eval_expr(e, &[])?);
+        }
+
+        let rid = heap.insert(values.clone())?;
+        self.stats.rows_inserted += 1;
+        self.stats.rows_affected += 1;
+
+        for idx in ctx.catalog.indexes_for_table(self.table_id) {
+            let col = idx.meta.column_ids[0];
+            let key = IndexKey::try_from(&values[col.0 as usize]).map_err(|e| {
+                ExecutionError::IndexViolation {
+                    index_id: idx.meta.id,
+                    reason: e.into(),
+                }
+            })?;
+
+            idx.index.lock().unwrap().insert(key, rid)?;
+            self.stats.record_index_insert(idx.meta.id);
+        }
+
+        Ok(None)
     }
 
-    fn close(&mut self) {
-        // No-op here; actual work is done by engine
+    fn close(&mut self, _ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
+        Ok(vec![self.stats.clone()])
     }
 }

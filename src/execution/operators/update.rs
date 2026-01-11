@@ -1,6 +1,7 @@
 use crate::catalog::ids::{ColumnId, TableId};
 use crate::execution::context::ExecutionContext;
-use crate::execution::executor::{Executor, Row};
+use crate::execution::errors::TableMutationStats;
+use crate::execution::executor::{ExecResult, Executor, Row};
 use crate::ir::expr::Expr;
 
 pub struct UpdateExecutor {
@@ -10,7 +11,6 @@ pub struct UpdateExecutor {
 
     // runtime
     done: bool,
-    pub(crate) updated: usize,
 }
 
 impl UpdateExecutor {
@@ -24,29 +24,28 @@ impl UpdateExecutor {
             assignments,
             predicate,
             done: false,
-            updated: 0,
         }
     }
 }
 
-impl Executor for UpdateExecutor {
-    fn open(&mut self, _ctx: &ExecutionContext) {
+impl<'a> Executor<'a> for UpdateExecutor {
+    fn open(&mut self, _ctx: &ExecutionContext) -> ExecResult<()> {
         self.done = false;
-        self.updated = 0;
+        Ok(())
     }
 
-    fn next(&mut self) -> Option<Row> {
+    fn next(&mut self, _ctx: &ExecutionContext) -> ExecResult<Option<Row>> {
         // UPDATE produces no rows
         if self.done {
-            None
+            Ok(None)
         } else {
             self.done = true;
-            None
+            Ok(None)
         }
     }
 
-    fn close(&mut self) {
-        // actual update happens in engine
+    fn close(&mut self, _ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
+        // Actual UPDATE is performed by engine
+        Ok(vec![])
     }
 }
-

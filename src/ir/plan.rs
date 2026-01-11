@@ -2,10 +2,10 @@
 //!
 //! This module is FROZEN.
 
-use crate::{catalog::ids::ColumnId, ir::expr::Expr};
-
-pub type TableId = u32;
-pub type IndexId = u32;
+use crate::{
+    catalog::ids::{ColumnId, IndexId, TableId},
+    ir::{expr::Expr, index_predicate::IndexPredicate},
+};
 
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
@@ -45,7 +45,7 @@ pub enum LogicalPlan {
     IndexScan {
         table_id: TableId,
         index_id: IndexId,
-        predicate: Expr,
+        predicate: IndexPredicate,
     },
 
     Insert {

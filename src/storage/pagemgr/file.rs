@@ -20,14 +20,22 @@ pub struct FilePageManager {
 }
 
 impl FilePageManager {
-    pub fn open(path: &PathBuf) -> std::io::Result<Self> {
+    pub fn open(path: &PathBuf) -> StorageResult<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .open(path)?;
+            .open(path)
+            .map_err(|e| StorageError::Io {
+                message: e.to_string(),
+            })?;
 
-        let size = file.metadata()?.len();
+        let size = file
+            .metadata()
+            .map_err(|e| StorageError::Io {
+                message: e.to_string(),
+            })?
+            .len();
         let next_page_id = size / PAGE_SIZE as u64;
 
         Ok(Self {

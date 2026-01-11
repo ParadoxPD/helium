@@ -9,8 +9,10 @@ pub enum BindError {
     AmbiguousColumn(String),
     DuplicateColumn(String),
     ColumnCountMismatch,
+    NotImplemented(String),
     Unsupported,
     EmptyTable,
+    EmptyProject,
     TypeMismatch {
         column: String,
         expected: String,
@@ -51,6 +53,8 @@ impl fmt::Display for BindError {
                 write!(f, "{} {} {}", op, left, right)
             }
             BindError::TypeMismatchUnary { op, found } => todo!(),
+            BindError::EmptyProject => todo!(),
+            BindError::NotImplemented(_) => todo!(),
         }
     }
 }

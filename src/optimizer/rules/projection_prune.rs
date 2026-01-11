@@ -1,172 +1,219 @@
 use std::collections::HashSet;
 
-use crate::ir::expr::{ColumnRef, Expr};
-use crate::ir::plan::{Filter, Join, LogicalPlan, Project};
+use crate::{
+    catalog::ids::ColumnId,
+    ir::{
+        expr::Expr,
+        plan::{LogicalPlan, SortKey},
+    },
+    optimizer::errors::OptimizerError,
+};
 
-pub fn projection_prune(plan: &LogicalPlan) -> LogicalPlan {
+pub fn projection_prune(plan: &LogicalPlan) -> Result<LogicalPlan, OptimizerError> {
     let mut required = HashSet::new();
     collect_required_columns(plan, &mut required);
-    rewrite(plan, &mut required)
+    Ok(rewrite(plan, &required))
 }
 
-fn collect_required_columns(plan: &LogicalPlan, required: &mut HashSet<String>) {
+pub fn rewrite(plan: &LogicalPlan, required: &HashSet<ColumnId>) -> LogicalPlan {
     match plan {
-        LogicalPlan::Project(project) => {
-            for (_, alias) in &project.exprs {
-                required.insert(alias.clone());
-            }
-            collect_required_columns(&project.input, required);
-        }
-        LogicalPlan::Filter(filter) => {
-            collect_columns(&filter.predicate, required);
-            collect_required_columns(&filter.input, required);
-        }
-        LogicalPlan::Sort(sort) => {
-            for (expr, _) in &sort.keys {
-                collect_columns(expr, required);
-            }
-            collect_required_columns(&sort.input, required);
-        }
+        // -------------------------
+        // LIMIT
+        // -------------------------
+        LogicalPlan::Limit {
+            input,
+            limit,
+            offset,
+        } => LogicalPlan::Limit {
+            input: Box::new(rewrite(input, required)),
+            limit: *limit,
+            offset: *offset,
+        },
 
-        LogicalPlan::Limit(limit) => {
-            collect_required_columns(&limit.input, required);
-        }
-        LogicalPlan::Scan(_) => {}
-        LogicalPlan::IndexScan(_) => {}
-        LogicalPlan::Join(join) => {
-            collect_required_columns(&join.left, required);
-            collect_required_columns(&join.right, required);
-            collect_columns(&join.on, required);
-        }
-    }
-}
-
-fn rewrite(plan: &LogicalPlan, required: &mut HashSet<String>) -> LogicalPlan {
-    match plan {
-        LogicalPlan::Limit(limit) => LogicalPlan::Limit(limit.clone()),
-
-        LogicalPlan::Project(project) => {
-            let kept_exprs: Vec<(Expr, String)> = project
-                .exprs
+        // -------------------------
+        // PROJECT
+        // -------------------------
+        LogicalPlan::Project { input, exprs } => {
+            // Keep only expressions that reference required columns
+            let kept_exprs: Vec<Expr> = exprs
                 .iter()
-                .filter(|(_, alias)| required.contains(alias))
+                .filter(|expr| expr_uses_any(expr, required))
                 .cloned()
                 .collect();
 
-            let rewritten_input = rewrite(&project.input, required);
-
-            // CASE 1: Project → Scan (your existing logic)
-            if let LogicalPlan::Scan(mut scan) = rewritten_input {
-                let mut projected_cols = Vec::new();
-                let mut is_identity = true;
-
-                for (expr, alias) in &kept_exprs {
-                    match expr {
-                        Expr::Column(col) if col.name == *alias => {
-                            projected_cols.push(alias.clone());
-                        }
-                        _ => {
-                            is_identity = false;
-                            break;
-                        }
-                    }
-                }
-
-                if is_identity {
-                    scan.columns = projected_cols;
-                    return LogicalPlan::Scan(scan);
-                }
-
-                return LogicalPlan::Project(Project {
-                    input: Box::new(LogicalPlan::Scan(scan)),
-                    exprs: kept_exprs,
-                });
+            // If projection becomes identity, remove it
+            if kept_exprs.is_empty() {
+                return rewrite(input, required);
             }
 
-            if let LogicalPlan::Project(inner) = &rewritten_input {
-                let outer_cols: HashSet<_> = kept_exprs.iter().map(|(_, name)| name).collect();
-
-                let inner_cols: HashSet<_> = inner.exprs.iter().map(|(_, name)| name).collect();
-
-                // If outer ⊆ inner, inner project is redundant
-                if outer_cols.is_subset(&inner_cols) {
-                    return LogicalPlan::Project(Project {
-                        exprs: kept_exprs,
-                        input: inner.input.clone(),
-                    });
-                }
-            }
-
-            if let LogicalPlan::Filter(filter) = &rewritten_input {
-                if let LogicalPlan::Project(inner_proj) = filter.input.as_ref() {
-                    let outer_cols: HashSet<String> =
-                        kept_exprs.iter().map(|(_, name)| name.clone()).collect();
-
-                    let mut filter_cols = HashSet::new();
-                    collect_columns(&filter.predicate, &mut filter_cols);
-
-                    let inner_cols: HashSet<String> = inner_proj
-                        .exprs
-                        .iter()
-                        .map(|(_, name)| name.clone())
-                        .collect();
-
-                    let needed: HashSet<String> = outer_cols.union(&filter_cols).cloned().collect();
-
-                    // If outer ∪ predicate ⊆ inner, inner project is redundant
-                    if needed.is_subset(&inner_cols) {
-                        return LogicalPlan::Project(Project {
-                            exprs: kept_exprs,
-                            input: Box::new(LogicalPlan::Filter(Filter {
-                                predicate: filter.predicate.clone(),
-                                input: inner_proj.input.clone(),
-                            })),
-                        });
-                    }
-                }
-            }
-
-            // Default case
-            LogicalPlan::Project(Project {
-                input: Box::new(rewritten_input),
+            LogicalPlan::Project {
+                input: Box::new(rewrite(input, required)),
                 exprs: kept_exprs,
-            })
+            }
         }
 
-        LogicalPlan::Filter(filter) => LogicalPlan::Filter(Filter {
-            input: Box::new(rewrite(&filter.input, required)),
-            predicate: filter.predicate.clone(),
-        }),
+        // -------------------------
+        // FILTER
+        // -------------------------
+        LogicalPlan::Filter { input, predicate } => LogicalPlan::Filter {
+            input: Box::new(rewrite(input, required)),
+            predicate: predicate.clone(),
+        },
 
-        LogicalPlan::Scan(scan) => {
-            let mut scan = scan.clone();
-            scan.columns = required.iter().cloned().collect();
-            LogicalPlan::Scan(scan)
+        // -------------------------
+        // SORT
+        // -------------------------
+        LogicalPlan::Sort { input, keys } => LogicalPlan::Sort {
+            input: Box::new(rewrite(input, required)),
+            keys: keys.clone(),
+        },
+
+        // -------------------------
+        // JOIN
+        // -------------------------
+        LogicalPlan::Join {
+            left,
+            right,
+            on,
+            join_type,
+        } => LogicalPlan::Join {
+            left: Box::new(rewrite(left, required)),
+            right: Box::new(rewrite(right, required)),
+            on: on.clone(),
+            join_type: join_type.clone(),
+        },
+
+        // -------------------------
+        // SCAN / INDEXSCAN (terminal)
+        // -------------------------
+        LogicalPlan::Scan { .. }
+        | LogicalPlan::IndexScan { .. }
+        | LogicalPlan::Insert { .. }
+        | LogicalPlan::Update { .. }
+        | LogicalPlan::Delete { .. } => plan.clone(),
+    }
+}
+fn expr_uses_any(expr: &Expr, required: &HashSet<ColumnId>) -> bool {
+    match expr {
+        Expr::BoundColumn { column_id, .. } => required.contains(column_id),
+
+        Expr::Unary { expr, .. } => expr_uses_any(expr, required),
+
+        Expr::Binary { left, right, .. } => {
+            expr_uses_any(left, required) || expr_uses_any(right, required)
         }
-        LogicalPlan::IndexScan(_) => plan.clone(),
 
-        LogicalPlan::Sort(sort) => LogicalPlan::Sort(crate::ir::plan::Sort {
-            input: Box::new(rewrite(&sort.input, required)),
-            keys: sort.keys.clone(),
-        }),
-        LogicalPlan::Join(join) => LogicalPlan::Join(Join {
-            left: Box::new(rewrite(&join.left, required)),
-            right: Box::new(rewrite(&join.right, required)),
-            on: join.on.clone(),
-        }),
+        Expr::Literal(_) | Expr::Null => false,
     }
 }
 
-fn collect_columns(expr: &Expr, required: &mut HashSet<String>) {
+fn collect_columns(expr: &Expr, out: &mut HashSet<ColumnId>) {
     match expr {
-        Expr::Column(ColumnRef { name, .. }) => {
-            required.insert(name.clone());
+        Expr::BoundColumn { column_id, .. } => {
+            out.insert(*column_id);
         }
-        Expr::Unary { expr, .. } => collect_columns(expr, required),
+        Expr::Unary { expr, .. } => collect_columns(expr, out),
         Expr::Binary { left, right, .. } => {
-            collect_columns(left, required);
-            collect_columns(right, required);
+            collect_columns(left, out);
+            collect_columns(right, out);
         }
         _ => {}
+    }
+}
+
+fn collect_expr_columns(expr: &Expr, required: &mut HashSet<ColumnId>) {
+    match expr {
+        Expr::BoundColumn { column_id, .. } => {
+            required.insert(*column_id);
+        }
+
+        Expr::Unary { expr, .. } => {
+            collect_expr_columns(expr, required);
+        }
+
+        Expr::Binary { left, right, .. } => {
+            collect_expr_columns(left, required);
+            collect_expr_columns(right, required);
+        }
+
+        Expr::Literal(_) | Expr::Null => {}
+    }
+}
+
+pub fn collect_required_columns(plan: &LogicalPlan, required: &mut HashSet<ColumnId>) {
+    match plan {
+        // -------------------------
+        // PROJECT
+        // -------------------------
+        LogicalPlan::Project { input, exprs } => {
+            for expr in exprs {
+                collect_expr_columns(expr, required);
+            }
+            collect_required_columns(input, required);
+        }
+
+        // -------------------------
+        // FILTER
+        // -------------------------
+        LogicalPlan::Filter { input, predicate } => {
+            collect_expr_columns(predicate, required);
+            collect_required_columns(input, required);
+        }
+
+        // -------------------------
+        // SORT
+        // -------------------------
+        LogicalPlan::Sort { input, keys } => {
+            for SortKey { expr, .. } in keys {
+                collect_expr_columns(expr, required);
+            }
+            collect_required_columns(input, required);
+        }
+
+        // -------------------------
+        // JOIN
+        // -------------------------
+        LogicalPlan::Join {
+            left,
+            right,
+            on,
+            join_type,
+        } => {
+            collect_expr_columns(on, required);
+            collect_required_columns(left, required);
+            collect_required_columns(right, required);
+        }
+
+        // -------------------------
+        // LIMIT
+        // -------------------------
+        LogicalPlan::Limit { input, .. } => {
+            collect_required_columns(input, required);
+        }
+
+        // -------------------------
+        // INDEX SCAN
+        // -------------------------
+        LogicalPlan::IndexScan { predicate, .. } => {
+            use crate::ir::index_predicate::IndexPredicate;
+
+            match predicate {
+                IndexPredicate::Eq(v) => {
+                    // literal only → no column usage
+                    let _ = v;
+                }
+                IndexPredicate::Range { low, high } => {
+                    let _ = (low, high);
+                }
+            }
+        }
+
+        // -------------------------
+        // TERMINALS
+        // -------------------------
+        LogicalPlan::Scan { .. }
+        | LogicalPlan::Insert { .. }
+        | LogicalPlan::Update { .. }
+        | LogicalPlan::Delete { .. } => {}
     }
 }

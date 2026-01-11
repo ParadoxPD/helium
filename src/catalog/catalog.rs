@@ -1,9 +1,17 @@
 use std::collections::HashMap;
+use std::sync::Mutex;
 
+use crate::catalog::column::ColumnMeta;
 use crate::catalog::errors::CatalogError;
 use crate::catalog::ids::*;
 use crate::catalog::index::{IndexEntry, IndexMeta};
 use crate::catalog::table::TableMeta;
+use crate::storage::buffer::pool::{BufferPool, BufferPoolHandle};
+use crate::storage::index::btree::BTreeIndex;
+use crate::storage::index::btree::disk::BPlusTree;
+use crate::storage::pagemgr::file::FilePageManager;
+use crate::types::datatype::DataType;
+use crate::types::schema::Schema;
 
 pub struct Catalog {
     next_table_id: u32,
@@ -35,7 +43,7 @@ impl Catalog {
     pub fn create_table(
         &mut self,
         name: String,
-        columns: Vec<(String, crate::types::datatype::DataType, bool)>,
+        columns: Vec<(String, DataType, bool)>,
     ) -> Result<TableId, CatalogError> {
         if self.tables_by_name.contains_key(&name) {
             return Err(CatalogError::TableExists(name));
@@ -44,12 +52,12 @@ impl Catalog {
         let table_id = TableId(self.next_table_id);
         self.next_table_id += 1;
 
-        let mut cols = Vec::new();
+        let mut schema = Schema::new();
         for (name, ty, nullable) in columns {
             let col_id = ColumnId(self.next_column_id);
             self.next_column_id += 1;
 
-            cols.push(crate::catalog::column::ColumnMeta {
+            schema.push(ColumnMeta {
                 id: col_id,
                 name,
                 data_type: ty,
@@ -60,7 +68,7 @@ impl Catalog {
         let meta = TableMeta {
             id: table_id,
             name: name.clone(),
-            columns: cols,
+            schema: schema,
         };
 
         self.tables_by_name.insert(name, table_id);
@@ -103,11 +111,6 @@ impl Catalog {
             unique,
         };
 
-        let entry = IndexEntry {
-            meta,
-            index: todo!(),
-        };
-
         self.indexes_by_name.insert(name, index_id);
         self.indexes_by_id.insert(index_id, entry);
 
@@ -122,5 +125,17 @@ impl Catalog {
         self.indexes_by_id
             .values()
             .filter(move |i| i.meta.table_id == table_id)
+    }
+
+    pub fn find_index_on_column(
+        &self,
+        table_id: TableId,
+        column_id: ColumnId,
+    ) -> Option<&IndexEntry> {
+        self.indexes_by_id.values().find(|idx| {
+            idx.meta.table_id == table_id
+                && idx.meta.column_ids.len() == 1
+                && idx.meta.column_ids[0] == column_id
+        })
     }
 }

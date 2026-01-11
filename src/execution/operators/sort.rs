@@ -1,20 +1,21 @@
+use std::cmp::Ordering;
+
 use crate::execution::context::ExecutionContext;
+use crate::execution::errors::TableMutationStats;
 use crate::execution::eval_expr::eval_expr;
-use crate::execution::executor::{Executor, Row};
+use crate::execution::executor::{ExecResult, Executor, Row};
 use crate::ir::plan::SortKey;
 use crate::types::value::Value;
 
-pub struct SortExecutor {
-    input: Box<dyn Executor>,
+pub struct SortExecutor<'a> {
+    input: Box<dyn Executor<'a>>,
     keys: Vec<SortKey>,
-
-    // runtime state
     buffer: Vec<Row>,
     pos: usize,
 }
 
-impl SortExecutor {
-    pub fn new(input: Box<dyn Executor>, keys: Vec<SortKey>) -> Self {
+impl<'a> SortExecutor<'a> {
+    pub fn new(input: Box<dyn Executor<'a>>, keys: Vec<SortKey>) -> Self {
         Self {
             input,
             keys,
@@ -24,66 +25,58 @@ impl SortExecutor {
     }
 }
 
-impl Executor for SortExecutor {
-    fn open(&mut self, ctx: &ExecutionContext) {
+impl<'a> Executor<'a> for SortExecutor<'a> {
+    fn open(&mut self, ctx: &ExecutionContext) -> ExecResult<()> {
         self.buffer.clear();
         self.pos = 0;
+        self.input.open(ctx)?;
 
-        self.input.open(ctx);
-
-        // 1. Drain child
-        while let Some(row) = self.input.next() {
+        while let Some(row) = self.input.next(ctx)? {
             self.buffer.push(row);
         }
 
-        // 2. Sort buffer
         let keys = self.keys.clone();
         self.buffer.sort_by(|a, b| compare_rows(a, b, &keys));
+
+        Ok(())
     }
 
-    fn next(&mut self) -> Option<Row> {
+    fn next(&mut self, _ctx: &ExecutionContext) -> ExecResult<Option<Row>> {
         if self.pos >= self.buffer.len() {
-            return None;
+            return Ok(None);
         }
 
         let row = self.buffer[self.pos].clone();
         self.pos += 1;
-        Some(row)
+        Ok(Some(row))
     }
 
-    fn close(&mut self) {
+    fn close(&mut self, ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
         self.buffer.clear();
         self.pos = 0;
-        self.input.close();
+        self.input.close(ctx)
     }
 }
 
-use std::cmp::Ordering;
-
 fn compare_rows(a: &Row, b: &Row, keys: &[SortKey]) -> Ordering {
     for key in keys {
-        let va = eval_expr(&key.expr, a);
-        let vb = eval_expr(&key.expr, b);
+        let va = eval_expr(&key.expr, a).unwrap_or(Value::Null);
+        let vb = eval_expr(&key.expr, b).unwrap_or(Value::Null);
 
         let ord = compare_values(&va, &vb);
-
         if ord != Ordering::Equal {
             return if key.asc { ord } else { ord.reverse() };
         }
     }
-
     Ordering::Equal
 }
 
 fn compare_values(a: &Value, b: &Value) -> Ordering {
     use Ordering::*;
-
     match (a, b) {
-        // NULLs sort last (Postgres / SQLite default)
         (Value::Null, Value::Null) => Equal,
         (Value::Null, _) => Greater,
         (_, Value::Null) => Less,
-
-        _ => a.cmp(b).unwrap_or(Equal), // type mismatch should not happen
+        _ => a.partial_cmp(b).unwrap_or(Equal),
     }
 }

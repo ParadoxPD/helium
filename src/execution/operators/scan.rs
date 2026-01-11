@@ -4,17 +4,18 @@ use crate::{
     diagnostics::debugger::Component,
     execution::{
         context::ExecutionContext,
-        executor::{Executor, Row},
+        errors::{ExecutionError, TableMutationStats},
+        executor::{ExecResult, Executor, Row},
     },
     storage::heap::{heap_cursor::HeapCursor, heap_table::HeapTable},
 };
 
-pub struct ScanExecutor {
+pub struct ScanExecutor<'a> {
     table_id: TableId,
-    cursor: Option<HeapCursor>,
+    cursor: Option<HeapCursor<'a>>,
 }
 
-impl ScanExecutor {
+impl<'a> ScanExecutor<'a> {
     pub fn new(table_id: TableId) -> Self {
         Self {
             table_id,
@@ -23,42 +24,36 @@ impl ScanExecutor {
     }
 }
 
-impl Executor for ScanExecutor {
-    fn open(&mut self, ctx: &ExecutionContext) {
-        db_trace!(
-            Component::Executor,
-            "Opening scan on table '{}'",
-            self.alias
-        );
-        self.cursor = Some(self.table.clone().scan());
-        let table = ctx
-            .catalog
-            .get_table_by_id(self.table_id)
-            .expect("table must exist at execution time");
+impl<'a> Executor<'a> for ScanExecutor<'a> {
+    fn open(&mut self, ctx: &ExecutionContext) -> ExecResult<()> {
+        let table_meta =
+            ctx.catalog
+                .get_table_by_id(self.table_id)
+                .ok_or(ExecutionError::TableNotFound {
+                    table_id: self.table_id,
+                })?;
 
-        // IMPORTANT: execution only grabs the heap handle
-        let heap: &HeapTable = table.heap(); // adapt to your API
-        self.cursor = Some(heap.scan());
+        let heap = HeapTable::open(table_meta.id, ctx.buffer_pool.clone());
+        self.cursor = Some(heap.scan()?);
+        Ok(())
     }
 
-    fn next(&mut self) -> Option<Row> {
-        db_trace!(Component::Executor, "ScanExec::next() on '{}'", self.alias);
-        let cursor = self.cursor.as_mut()?;
+    fn next(&mut self, ctx: &'a ExecutionContext) -> ExecResult<Option<Row>> {
+        let cursor = self.cursor.as_mut().ok_or(ExecutionError::Internal(
+            "scan cursor not initialized".into(),
+        ))?;
 
-        let (row_id, storage_row) = cursor.next()?;
-        db_trace!(
-            Component::Executor,
-            "Found row: row id = {:?}, values = {:?}",
-            row_id,
-            storage_row.values
-        );
-
-        // IMPORTANT INVARIANT:
-        // storage_row.values is already Vec<Value> in schema order
-        Some(storage_row.values.clone())
+        match cursor.next() {
+            Some((_rid, row)) => {
+                ctx.stats.rows_scanned += 1;
+                Ok(Some(row.values.clone()))
+            }
+            None => Ok(None),
+        }
     }
 
-    fn close(&mut self) {
+    fn close(&mut self, _ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
         self.cursor = None;
+        Ok(vec![])
     }
 }

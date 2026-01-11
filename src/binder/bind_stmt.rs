@@ -12,7 +12,7 @@ use crate::binder::scope::ColumnScope;
 use crate::catalog::catalog::Catalog;
 use crate::frontend::sql::ast::*;
 use crate::ir::plan::JoinType;
-use crate::types::schema::ColumnId;
+use crate::types::datatype::DataType;
 
 pub struct Binder<'a> {
     pub catalog: &'a Catalog,
@@ -119,36 +119,42 @@ impl<'a> Binder<'a> {
 
 impl<'a> Binder<'a> {
     fn bind_from(&self, from: FromItem) -> Result<(BoundFrom, ColumnScope), BindError> {
-        let mut columns = HashMap::new();
-        let from = self.bind_from_inner(from, &mut columns)?;
-        Ok((from, ColumnScope::new(columns)))
+        let mut columns_scope = ColumnScope::new();
+        let from = self.bind_from_inner(from, &mut columns_scope)?;
+        Ok((from, columns_scope))
     }
 
     fn bind_from_inner(
         &self,
         from: FromItem,
-        columns: &mut HashMap<String, (ColumnId, crate::types::datatype::DataType)>,
+        scope: &mut ColumnScope,
     ) -> Result<BoundFrom, BindError> {
         match from {
-            FromItem::Table { name, alias } => {
+            FromItem::Table { name, .. } => {
                 let table = self
                     .catalog
-                    .get_table(&name)
+                    .get_table_by_name(&name)
                     .ok_or_else(|| BindError::UnknownTable(name.clone()))?;
 
                 for col in &table.schema.columns {
-                    columns.insert(col.name.clone(), (col.id, col.data_type.clone()));
+                    scope.add_column(col.name.clone(), col.id, col.data_type.clone())?;
                 }
 
                 Ok(BoundFrom::Table { table_id: table.id })
             }
 
             FromItem::Join { left, right, on } => {
-                let left = self.bind_from_inner(*left, columns)?;
-                let right = self.bind_from_inner(*right, columns)?;
-                let scope = ColumnScope::new(columns.clone());
+                let left = self.bind_from_inner(*left, scope)?;
+                let right = self.bind_from_inner(*right, scope)?;
 
-                let (on_expr, _) = bind_expr(&on, &scope)?;
+                let (on_expr, ty) = bind_expr(&on, scope)?;
+                if ty != DataType::Boolean {
+                    return Err(BindError::TypeMismatchBinary {
+                        op: "JOIN ON".into(),
+                        left: ty,
+                        right: DataType::Boolean,
+                    });
+                }
 
                 Ok(BoundFrom::Join {
                     left: Box::new(left),
@@ -161,22 +167,18 @@ impl<'a> Binder<'a> {
     }
 
     fn bind_insert(&self, stmt: InsertStmt) -> Result<BoundInsert, BindError> {
-        let table = self
-            .catalog
-            .get_table(&stmt.table)
-            .ok_or_else(|| BindError::UnknownTable(stmt.table.clone()))?;
-
         let mut rows = Vec::new();
 
-        let scope = ColumnScope::new(
-            table
-                .schema
-                .columns
-                .iter()
-                .map(|c| (c.name.clone(), (c.id, c.data_type.clone())))
-                .collect(),
-        );
+        let table = self
+            .catalog
+            .get_table_by_name(&stmt.table)
+            .ok_or_else(|| BindError::UnknownTable(stmt.table.clone()))?;
 
+        let mut scope = ColumnScope::new();
+
+        for col in table.schema.columns.iter() {
+            scope.add_column(col.name.clone(), col.id, col.data_type.clone())?
+        }
         for row in stmt.rows {
             if row.len() != table.schema.columns.len() {
                 return Err(BindError::ColumnCountMismatch);
@@ -199,18 +201,14 @@ impl<'a> Binder<'a> {
     fn bind_update(&self, stmt: UpdateStmt) -> Result<BoundUpdate, BindError> {
         let table = self
             .catalog
-            .get_table(&stmt.table)
+            .get_table_by_name(&stmt.table)
             .ok_or_else(|| BindError::UnknownTable(stmt.table.clone()))?;
 
-        let scope = ColumnScope::new(
-            table
-                .schema
-                .columns
-                .iter()
-                .map(|c| (c.name.clone(), (c.id, c.data_type.clone())))
-                .collect(),
-        );
+        let mut scope = ColumnScope::new();
 
+        for col in table.schema.columns.iter() {
+            scope.add_column(col.name.clone(), col.id, col.data_type.clone())?
+        }
         let assignments = stmt
             .assignments
             .into_iter()
@@ -239,17 +237,14 @@ impl<'a> Binder<'a> {
     fn bind_delete(&self, stmt: DeleteStmt) -> Result<BoundDelete, BindError> {
         let table = self
             .catalog
-            .get_table(&stmt.table)
+            .get_table_by_name(&stmt.table)
             .ok_or_else(|| BindError::UnknownTable(stmt.table.clone()))?;
 
-        let scope = ColumnScope::new(
-            table
-                .schema
-                .columns
-                .iter()
-                .map(|c| (c.name.clone(), (c.id, c.data_type.clone())))
-                .collect(),
-        );
+        let mut scope = ColumnScope::new();
+
+        for col in table.schema.columns.iter() {
+            scope.add_column(col.name.clone(), col.id, col.data_type.clone())?
+        }
 
         let predicate = stmt
             .where_clause
@@ -274,8 +269,8 @@ impl<'a> Binder<'a> {
             }
 
             None => {
-                for (id, _) in scope.columns.values() {
-                    out.push(BoundExpr::Column { column_id: *id });
+                for (id, _) in scope.iter_columns() {
+                    out.push(BoundExpr::Column { column_id: id });
                 }
             }
         }

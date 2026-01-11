@@ -1,15 +1,22 @@
-use crate::catalog::ids::TableId;
-use crate::execution::context::ExecutionContext;
-use crate::execution::executor::{Executor, Row};
-use crate::ir::expr::Expr;
+use crate::{
+    catalog::ids::TableId,
+    execution::{
+        context::ExecutionContext,
+        errors::{ExecutionError, TableMutationStats},
+        eval_expr::eval_expr,
+        executor::{ExecResult, Executor, Row},
+    },
+    ir::expr::Expr,
+    storage::{heap::heap_table::HeapTable, index::btree::key::IndexKey},
+    types::value::Value,
+};
 
 pub struct DeleteExecutor {
-    pub(crate) table_id: TableId,
-    pub(crate) predicate: Option<Expr>,
+    table_id: TableId,
+    predicate: Option<Expr>,
 
-    // runtime
     done: bool,
-    pub(crate) deleted: usize,
+    stats: TableMutationStats,
 }
 
 impl DeleteExecutor {
@@ -18,29 +25,69 @@ impl DeleteExecutor {
             table_id,
             predicate,
             done: false,
-            deleted: 0,
+            stats: TableMutationStats::new(table_id),
         }
     }
 }
 
-impl Executor for DeleteExecutor {
-    fn open(&mut self, _ctx: &ExecutionContext) {
+impl<'a> Executor<'a> for DeleteExecutor {
+    fn open(&mut self, _ctx: &ExecutionContext) -> ExecResult<()> {
         self.done = false;
-        self.deleted = 0;
+        Ok(())
     }
 
-    fn next(&mut self) -> Option<Row> {
-        // DELETE produces no rows
+    fn next(&mut self, ctx: &ExecutionContext) -> ExecResult<Option<Row>> {
         if self.done {
-            None
-        } else {
-            self.done = true;
-            None
+            return Ok(None);
         }
+
+        self.done = true;
+
+        let table_meta =
+            ctx.catalog
+                .get_table_by_id(self.table_id)
+                .ok_or(ExecutionError::TableNotFound {
+                    table_id: self.table_id,
+                })?;
+        let heap = HeapTable::open(table_meta.id, ctx.buffer_pool.clone());
+        let mut cursor = heap.scan()?;
+
+        let mut to_delete = Vec::new();
+
+        while let Some((rid, row)) = cursor.next()? {
+            if let Some(pred) = &self.predicate {
+                match eval_expr(pred, &row.values)? {
+                    Value::Boolean(true) => {}
+                    _ => continue,
+                }
+            }
+            to_delete.push((rid, row.values.clone()));
+        }
+
+        for (rid, old_row) in to_delete {
+            // index maintenance
+            for idx in ctx.catalog.indexes_for_table(self.table_id) {
+                let col = idx.meta.column_ids[0];
+                let key = IndexKey::try_from(&old_row[col.0 as usize]).map_err(|e| {
+                    ExecutionError::IndexViolation {
+                        index_id: idx.meta.id,
+                        reason: e.into(),
+                    }
+                })?;
+
+                idx.index.lock().unwrap().delete(&key, rid)?;
+                self.stats.record_index_delete(idx.meta.id);
+            }
+
+            heap.delete(rid)?;
+            self.stats.rows_deleted += 1;
+            self.stats.rows_affected += 1;
+        }
+
+        Ok(None)
     }
 
-    fn close(&mut self) {
-        // actual deletion happens in engine
+    fn close(&mut self, _ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
+        Ok(vec![self.stats.clone()])
     }
 }
-

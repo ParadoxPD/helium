@@ -1,7 +1,7 @@
 use crate::catalog::ids::ColumnId;
 use crate::types::datatype::DataType;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnMeta {
     pub id: ColumnId,
     pub name: String,

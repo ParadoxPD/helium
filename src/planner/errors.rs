@@ -1,5 +1,9 @@
 use std::fmt;
 
+use crate::ir::plan::LogicalPlan;
+
+pub type PlanResult = Result<LogicalPlan, PlanError>;
+
 #[derive(Debug)]
 pub enum PlanError {
     InvalidPlan { reason: &'static str },

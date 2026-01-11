@@ -1,6 +1,9 @@
+use crate::api::errors::{DefinitionResult, MutationKind, MutationResult, QueryResult};
 use crate::execution::context::ExecutionContext;
-use crate::execution::eval_expr::eval_expr;
-use crate::execution::executor::{Executor, Row};
+use crate::execution::errors::{
+    ExecutionError, ExecutionResult, ExecutionResultType, TableMutationStats,
+};
+use crate::execution::executor::{ExecResult, Executor, Row};
 use crate::execution::operators::delete::DeleteExecutor;
 use crate::execution::operators::filter::FilterExecutor;
 use crate::execution::operators::index_scan::IndexScanExecutor;
@@ -12,48 +15,93 @@ use crate::execution::operators::scan::ScanExecutor;
 use crate::execution::operators::sort::SortExecutor;
 use crate::execution::operators::update::UpdateExecutor;
 use crate::ir::plan::LogicalPlan;
-use crate::storage::errors::StorageError;
-use crate::storage::index::btree::key::IndexKey;
-use crate::storage::page::row_id::RowId;
-use crate::types::value::Value;
+use crate::storage::heap::heap_table::HeapTable;
 
-pub enum ExecutionResult {
-    Rows(Vec<Row>),
-    Affected(usize),
+pub fn execute_plan(plan: LogicalPlan, ctx: &mut ExecutionContext) -> ExecutionResultType {
+    match plan {
+        // -------------------------
+        // QUERY
+        // -------------------------
+        LogicalPlan::Scan { .. }
+        | LogicalPlan::Filter { .. }
+        | LogicalPlan::Project { .. }
+        | LogicalPlan::Sort { .. }
+        | LogicalPlan::Limit { .. }
+        | LogicalPlan::Join { .. }
+        | LogicalPlan::IndexScan { .. } => execute_query(plan, ctx),
+
+        // -------------------------
+        // DML
+        // -------------------------
+        LogicalPlan::Insert { .. } | LogicalPlan::Update { .. } | LogicalPlan::Delete { .. } => {
+            execute_mutation(plan, ctx)
+        }
+
+        // -------------------------
+        // DDL (future)
+        // -------------------------
+        _ => Err(ExecutionError::InvalidPlan {
+            reason: "unsupported plan type".into(),
+        }),
+    }
 }
 
-pub fn execute_plan(plan: LogicalPlan, ctx: &ExecutionContext) -> ExecutionResult {
-    match plan {
-        LogicalPlan::Insert { table_id, rows } => {
-            let mut exec = InsertExecutor::new(table_id, rows);
-            exec.open(ctx);
-            let count = execute_insert(&mut exec, ctx);
-            exec.close();
-            ExecutionResult::Affected(count)
-        }
+pub fn execute_query(plan: LogicalPlan, ctx: &mut ExecutionContext) -> ExecutionResultType {
+    let schema = plan.output_schema(&ctx.catalog)?;
 
-        LogicalPlan::Delete {
-            table_id,
-            predicate,
-        } => {
-            let mut exec = DeleteExecutor::new(table_id, predicate);
-            exec.open(ctx);
-            let count = execute_delete(&mut exec, ctx);
-            exec.close();
-            ExecutionResult::Affected(count)
-        }
+    let mut root = build_executor(plan, ctx)?;
+    root.open(ctx)?;
 
-        LogicalPlan::Update {
-            table_id,
-            assignments,
-            predicate,
-        } => {
-            let mut exec = UpdateExecutor::new(table_id, assignments, predicate);
-            exec.open(ctx);
-            let count = execute_update(&mut exec, ctx);
-            exec.close();
-            ExecutionResult::Affected(count)
-        }
+    let mut rows = Vec::new();
+
+    while let Some(row) = root.next(ctx)? {
+        ctx.stats.rows_output += 1;
+        rows.push(row);
+    }
+
+    // Query executors return empty mutation stats
+    let _ = root.close(ctx)?;
+
+    Ok(ExecutionResult::Query(QueryResult {
+        schema,
+        rows,
+        stats: ctx.stats.clone(),
+    }))
+}
+
+pub fn execute_mutation(plan: LogicalPlan, ctx: &mut ExecutionContext) -> ExecutionResultType {
+    let kind = match &plan {
+        LogicalPlan::Insert { .. } => MutationKind::Insert,
+        LogicalPlan::Update { .. } => MutationKind::Update,
+        LogicalPlan::Delete { .. } => MutationKind::Delete,
+        _ => unreachable!(),
+    };
+
+    let mut exec = build_executor(plan, ctx)?;
+    exec.open(ctx)?;
+
+    // Drain executor (mutations usually return no rows)
+    while exec.next(ctx)?.is_some() {}
+
+    let per_table = exec.close(ctx)?;
+
+    let rows_affected = per_table.iter().map(|t| t.rows_affected).sum();
+
+    Ok(ExecutionResult::Mutation(MutationResult {
+        kind,
+        rows_affected,
+        per_table,
+        stats: ctx.stats.clone(),
+    }))
+}
+
+pub fn build_executor(plan: LogicalPlan, ctx: &ExecutionContext) -> ExecResult<Box<dyn Executor>> {
+    let table_meta = ctx.catalog.get_table_by_id(table_id)?;
+    let heap = HeapTable::open(table_meta.id, ctx.buffer_pool.clone());
+
+    Ok(match plan {
+        LogicalPlan::Scan { table_id } => Box::new(ScanExecutor::new(table_id)),
+
         LogicalPlan::IndexScan {
             table_id,
             index_id,
@@ -61,75 +109,54 @@ pub fn execute_plan(plan: LogicalPlan, ctx: &ExecutionContext) -> ExecutionResul
         } => {
             let table = ctx
                 .catalog
-                .get_table_by_id(*table_id)
-                .expect("table must exist");
+                .get_table_by_id(table_id)
+                .ok_or(ExecutionError::TableNotFound { table_id })?;
 
-            let index_entry = ctx
+            let index = ctx
                 .catalog
-                .get_index_by_id(*index_id)
-                .expect("index must exist");
+                .get_index_by_id(index_id)
+                .ok_or(ExecutionError::IndexNotFound { index_id })?;
 
-            Box::new(IndexScanExecutor::new(
-                table.heap(),
-                index_entry.index.clone(),
-                predicate.clone(),
-            ))
+            Box::new(IndexScanExecutor::new(heap, index.index.clone(), predicate))
         }
-
-        _ => {
-            let mut root = build_executor(plan, ctx);
-            root.open(ctx);
-
-            let mut rows = Vec::new();
-            while let Some(row) = root.next() {
-                rows.push(row);
-            }
-
-            root.close();
-            ExecutionResult::Rows(rows)
-        }
-    }
-}
-
-pub fn build_executor(plan: LogicalPlan, ctx: &ExecutionContext) -> Box<dyn Executor> {
-    match plan {
-        LogicalPlan::Scan { table_id } => Box::new(ScanExecutor::new(table_id)),
 
         LogicalPlan::Filter { input, predicate } => {
-            let child = build_executor(*input, ctx);
-            Box::new(FilterExecutor::new(child, predicate))
+            Box::new(FilterExecutor::new(build_executor(*input, ctx)?, predicate))
         }
 
         LogicalPlan::Project { input, exprs } => {
-            let child = build_executor(*input, ctx);
-            Box::new(ProjectExecutor::new(child, exprs))
+            Box::new(ProjectExecutor::new(build_executor(*input, ctx)?, exprs))
         }
 
         LogicalPlan::Sort { input, keys } => {
-            let child = build_executor(*input, ctx);
-            Box::new(SortExecutor::new(child, keys))
+            Box::new(SortExecutor::new(build_executor(*input, ctx)?, keys))
         }
 
         LogicalPlan::Limit {
             input,
             limit,
             offset,
-        } => {
-            let child = build_executor(*input, ctx);
-            Box::new(LimitExecutor::new(child, limit, offset))
-        }
+        } => Box::new(LimitExecutor::new(
+            build_executor(*input, ctx)?,
+            limit,
+            offset,
+        )),
 
         LogicalPlan::Join {
             left,
             right,
             on,
             join_type,
-        } => {
-            let l = build_executor(*left, ctx);
-            let r = build_executor(*right, ctx);
-            Box::new(JoinExecutor::new(l, r, on, join_type))
-        }
+        } => Box::new(JoinExecutor::new(
+            build_executor(*left, ctx)?,
+            build_executor(*right, ctx)?,
+            on,
+            join_type,
+        )),
 
+        // -------------------------
+        // DML AS EXECUTORS
+        // -------------------------
         LogicalPlan::Insert { table_id, rows } => Box::new(InsertExecutor::new(table_id, rows)),
 
         LogicalPlan::Update {
@@ -142,123 +169,5 @@ pub fn build_executor(plan: LogicalPlan, ctx: &ExecutionContext) -> Box<dyn Exec
             table_id,
             predicate,
         } => Box::new(DeleteExecutor::new(table_id, predicate)),
-    }
-}
-
-pub fn execute_insert(exec: &mut InsertExecutor, ctx: &ExecutionContext) -> StorageResult<usize> {
-    let table = ctx.catalog.get_table_by_id(exec.table_id).unwrap();
-    let heap = table.heap;
-
-    for row_exprs in &exec.rows {
-        let mut values = Vec::with_capacity(row_exprs.len());
-
-        for expr in row_exprs {
-            values.push(eval_expr(expr, &[]));
-        }
-
-        let rid = heap.insert(values.clone());
-
-        for index_entry in ctx.catalog.indexes_for_table(exec.table_id) {
-            let col_id = index_entry.meta.column_ids[0];
-            let key = IndexKey::try_from(&values[col_id.0 as usize]).map_err(|e| {
-                StorageError::IndexViolation {
-                    index_name: self.name.clone(),
-                    reason: e.to_string(),
-                }
-            })?;
-
-            index_entry.index.lock().unwrap().insert(key, rid);
-        }
-
-        exec.inserted += 1;
-    }
-
-    exec.inserted
-}
-
-pub fn execute_delete(exec: &mut DeleteExecutor, ctx: &ExecutionContext) -> usize {
-    let table = ctx.catalog.get_table_by_id(exec.table_id).unwrap();
-    let heap = table.heap();
-    let mut cursor = heap.scan();
-
-    let mut to_delete: Vec<(RowId, Vec<Value>)> = Vec::new();
-
-    while let Some((rid, storage_row)) = cursor.next() {
-        let row = storage_row.values.clone();
-
-        if let Some(pred) = &exec.predicate {
-            match eval_expr(pred, &row) {
-                Value::Boolean(true) => {}
-                Value::Boolean(false) | Value::Null => continue,
-                _ => panic!("DELETE predicate not boolean"),
-            }
-        }
-
-        to_delete.push((rid, row));
-    }
-
-    for (rid, old_row) in to_delete {
-        for index_entry in ctx.catalog.indexes_for_table(exec.table_id) {
-            let col_id = index_entry.meta.column_ids[0];
-            let key = IndexKey::try_from(&old_row[col_id.0 as usize]).map_err(|e| {
-                StorageError::IndexViolation {
-                    index_name: self.name.clone(),
-                    reason: e.to_string(),
-                }
-            })?;
-
-            index_entry.index.lock().unwrap().delete(&key, rid);
-        }
-
-        heap.delete(rid);
-        exec.deleted += 1;
-    }
-
-    exec.deleted
-}
-
-pub fn execute_update(exec: &mut UpdateExecutor, ctx: &ExecutionContext) -> usize {
-    let table = ctx.catalog.get_table_by_id(exec.table_id).unwrap();
-    let heap = table.heap();
-    let mut cursor = heap.scan();
-
-    let mut updates = Vec::new();
-
-    while let Some((rid, storage_row)) = cursor.next() {
-        let old_row = storage_row.values.clone();
-
-        if let Some(pred) = &exec.predicate {
-            match eval_expr(pred, &old_row) {
-                Value::Boolean(true) => {}
-                Value::Boolean(false) | Value::Null => continue,
-                _ => panic!("UPDATE predicate not boolean"),
-            }
-        }
-
-        let mut new_row = old_row.clone();
-        for (col_id, expr) in &exec.assignments {
-            new_row[col_id.0 as usize] = eval_expr(expr, &old_row);
-        }
-
-        updates.push((rid, old_row, new_row));
-    }
-
-    for (rid, old_row, new_row) in updates {
-        for index_entry in ctx.catalog.indexes_for_table(exec.table_id) {
-            let col_id = index_entry.meta.column_ids[0];
-
-            let old_key = &old_row[col_id.0 as usize];
-            let new_key = &new_row[col_id.0 as usize];
-
-            let mut idx = index_entry.index.lock().unwrap();
-            idx.delete(old_key, rid);
-            idx.insert(new_key, rid);
-        }
-
-        heap.delete(rid);
-        heap.insert(new_row);
-        exec.updated += 1;
-    }
-
-    exec.updated
+    })
 }

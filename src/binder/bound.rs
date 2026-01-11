@@ -2,10 +2,9 @@
 //!
 //! Fully resolved, planner-facing representation.
 
-use crate::catalog::ids::{IndexId, TableId};
+use crate::catalog::ids::{ColumnId, IndexId, TableId};
 use crate::ir::expr::{BinaryOp, UnaryOp};
 use crate::ir::plan::JoinType;
-use crate::types::schema::ColumnId;
 use crate::types::value::Value;
 
 #[derive(Debug, Clone)]

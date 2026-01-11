@@ -1,62 +1,57 @@
 use crate::{
-    exec::catalog::Catalog,
+    catalog::catalog::Catalog,
     ir::{
         expr::{BinaryOp, Expr},
-        plan::{Filter, IndexPredicate, IndexScan, LogicalPlan, Project},
+        index_predicate::IndexPredicate,
+        plan::LogicalPlan,
     },
+    optimizer::errors::OptimizerError,
 };
 
-pub fn index_selection(plan: &LogicalPlan, catalog: &Catalog) -> LogicalPlan {
-    match plan {
-        LogicalPlan::Filter(filter) => {
-            // First, recursively optimize the input
-            let optimized_input = index_selection(&filter.input, catalog);
+pub fn index_selection(
+    plan: &LogicalPlan,
+    catalog: &Catalog,
+) -> Result<LogicalPlan, OptimizerError> {
+    Ok(match plan {
+        LogicalPlan::Filter { input, predicate } => {
+            let input = index_selection(input, catalog)?;
 
-            // We only care about Filter(Scan)
-            let LogicalPlan::Scan(scan) = &optimized_input else {
-                return LogicalPlan::Filter(Filter {
-                    predicate: filter.predicate.clone(),
-                    input: Box::new(optimized_input),
+            let LogicalPlan::Scan { table_id } = &input else {
+                return Ok(LogicalPlan::Filter {
+                    input: Box::new(input),
+                    predicate: predicate.clone(),
                 });
             };
 
-            // Match: table.column = literal
             if let Expr::Binary {
                 left,
                 op: BinaryOp::Eq,
                 right,
-            } = &filter.predicate
+            } = predicate
             {
-                if let (Expr::BoundColumn { table, name }, Expr::Literal(value)) =
-                    (&**left, &**right)
+                if let (Expr::BoundColumn { column_id, .. }, Expr::Literal(v)) = (&**left, &**right)
                 {
-                    // Table name must match
-                    if table == &scan.table {
-                        // Check catalog for index
-                        if catalog.get_index(table, name).is_some() {
-                            return LogicalPlan::IndexScan(IndexScan {
-                                table: table.clone(),
-                                column: name.clone(),
-                                predicate: IndexPredicate::Eq(value.clone()),
-                            });
-                        }
+                    if let Some(index) = catalog.find_index_on_column(*table_id, *column_id) {
+                        return Ok(LogicalPlan::IndexScan {
+                            table_id: *table_id,
+                            index_id: index.meta.id,
+                            predicate: IndexPredicate::Eq(v.clone()),
+                        });
                     }
                 }
             }
 
-            // Default: keep filter
-            LogicalPlan::Filter(Filter {
-                predicate: filter.predicate.clone(),
-                input: Box::new(optimized_input),
-            })
+            LogicalPlan::Filter {
+                input: Box::new(input),
+                predicate: predicate.clone(),
+            }
         }
 
-        // Recurse into other nodes
-        LogicalPlan::Project(p) => LogicalPlan::Project(Project {
-            exprs: p.exprs.clone(),
-            input: Box::new(index_selection(&p.input, catalog)),
-        }),
+        LogicalPlan::Project { input, exprs } => LogicalPlan::Project {
+            input: Box::new(index_selection(input, catalog)?),
+            exprs: exprs.clone(),
+        },
 
         _ => plan.clone(),
-    }
+    })
 }

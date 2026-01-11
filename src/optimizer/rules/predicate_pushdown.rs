@@ -1,43 +1,47 @@
-use crate::ir::plan::{Filter, Join, LogicalPlan, Project};
+use crate::{ir::plan::LogicalPlan, optimizer::errors::OptimizerError};
 
-pub fn predicate_pushdown(plan: &LogicalPlan) -> LogicalPlan {
-    match plan {
-        LogicalPlan::Filter(filter) => push_filter(filter),
-        LogicalPlan::Project(project) => LogicalPlan::Project(Project {
-            input: Box::new(predicate_pushdown(&project.input)),
-            exprs: project.exprs.clone(),
-        }),
-        LogicalPlan::Sort(sort) => LogicalPlan::Sort(crate::ir::plan::Sort {
-            input: Box::new(predicate_pushdown(&sort.input)),
-            keys: sort.keys.clone(),
-        }),
+pub fn predicate_pushdown(plan: &LogicalPlan) -> Result<LogicalPlan, OptimizerError> {
+    Ok(match plan {
+        LogicalPlan::Filter { input, predicate } => {
+            let optimized_input = predicate_pushdown(input)?;
 
-        LogicalPlan::Limit(limit) => LogicalPlan::Limit(limit.clone()),
-        LogicalPlan::Scan(_) => plan.clone(),
-        LogicalPlan::IndexScan(_) => plan.clone(),
-        LogicalPlan::Join(join) => LogicalPlan::Join(Join {
-            left: Box::new(predicate_pushdown(&join.left)),
-            right: Box::new(predicate_pushdown(&join.right)),
-            on: join.on.clone(),
-        }),
-    }
-}
+            match optimized_input {
+                LogicalPlan::Project { input, exprs } => LogicalPlan::Project {
+                    input: Box::new(LogicalPlan::Filter {
+                        input,
+                        predicate: predicate.clone(),
+                    }),
+                    exprs,
+                },
+                other => LogicalPlan::Filter {
+                    input: Box::new(other),
+                    predicate: predicate.clone(),
+                },
+            }
+        }
 
-fn push_filter(filter: &Filter) -> LogicalPlan {
-    let optimized_input = predicate_pushdown(&filter.input);
+        LogicalPlan::Project { input, exprs } => LogicalPlan::Project {
+            input: Box::new(predicate_pushdown(input)?),
+            exprs: exprs.clone(),
+        },
 
-    match optimized_input {
-        LogicalPlan::Project(project) => LogicalPlan::Project(Project {
-            input: Box::new(LogicalPlan::Filter(Filter {
-                input: project.input,
-                predicate: filter.predicate.clone(),
-            })),
-            exprs: project.exprs,
-        }),
+        LogicalPlan::Sort { input, keys } => LogicalPlan::Sort {
+            input: Box::new(predicate_pushdown(input)?),
+            keys: keys.clone(),
+        },
 
-        other => LogicalPlan::Filter(Filter {
-            input: Box::new(other),
-            predicate: filter.predicate.clone(),
-        }),
-    }
+        LogicalPlan::Join {
+            left,
+            right,
+            on,
+            join_type,
+        } => LogicalPlan::Join {
+            left: Box::new(predicate_pushdown(left)?),
+            right: Box::new(predicate_pushdown(right)?),
+            on: on.clone(),
+            join_type: join_type.clone(),
+        },
+
+        _ => plan.clone(),
+    })
 }

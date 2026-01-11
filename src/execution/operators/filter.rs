@@ -1,44 +1,45 @@
 use crate::execution::context::ExecutionContext;
+use crate::execution::errors::{ExecutionError, TableMutationStats};
 use crate::execution::eval_expr::eval_expr;
-use crate::execution::executor::{Executor, Row};
+use crate::execution::executor::{ExecResult, Executor, Row};
 use crate::ir::expr::Expr;
 use crate::types::value::Value;
 
-pub struct FilterExecutor {
-    input: Box<dyn Executor>,
+pub struct FilterExecutor<'a> {
+    input: Box<dyn Executor<'a>>,
     predicate: Expr,
 }
 
-impl FilterExecutor {
-    pub fn new(input: Box<dyn Executor>, predicate: Expr) -> Self {
+impl<'a> FilterExecutor<'a> {
+    pub fn new(input: Box<dyn Executor<'a>>, predicate: Expr) -> Self {
         Self { input, predicate }
     }
 }
 
-impl Executor for FilterExecutor {
-    fn open(&mut self, ctx: &ExecutionContext) {
-        self.input.open(ctx);
+impl<'a> Executor<'a> for FilterExecutor<'a> {
+    fn open(&mut self, ctx: &ExecutionContext) -> ExecResult<()> {
+        self.input.open(ctx)
     }
 
-    fn next(&mut self) -> Option<Row> {
-        while let Some(row) = self.input.next() {
-            let value = eval_expr(&self.predicate, &row);
-
-            match value {
-                Value::Boolean(true) => return Some(row),
+    fn next(&mut self, ctx: &ExecutionContext) -> ExecResult<Option<Row>> {
+        while let Some(row) = self.input.next(ctx)? {
+            match eval_expr(&self.predicate, &row)? {
+                Value::Boolean(true) => return Ok(Some(row)),
                 Value::Boolean(false) | Value::Null => {
+                    ctx.stats.rows_filtered += 1;
                     continue;
                 }
-                other => {
-                    panic!("Filter predicate did not evaluate to boolean: {:?}", other);
+                _ => {
+                    return Err(ExecutionError::InvalidExpression {
+                        reason: "filter predicate must be boolean".into(),
+                    });
                 }
             }
         }
-
-        None
+        Ok(None)
     }
 
-    fn close(&mut self) {
-        self.input.close();
+    fn close(&mut self, ctx: &ExecutionContext) -> ExecResult<Vec<TableMutationStats>> {
+        self.input.close(ctx)
     }
 }
